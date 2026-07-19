@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import base64
+from typing import List
+
+_PACKED = (
+    "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2lnYXJlY2svdnBuLWNvbmZpZ3MtZm9y"
+    "LXJ1c3NpYS9yZWZzL2hlYWRzL21haW4vVmxlc3MtUmVhbGl0eS1XaGl0ZS1MaXN0cy1SdXMtTW9i"
+    "aWxlLnR4dApodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vaWdhcmVjay92cG4tY29u"
+    "Zmlncy1mb3ItcnVzc2lhL3JlZnMvaGVhZHMvbWFpbi9WbGVzcy1SZWFsaXR5LVdoaXRlLUxpc3Rz"
+    "LVJ1cy1Nb2JpbGUtMi50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2lnYXJl"
+    "Y2svdnBuLWNvbmZpZ3MtZm9yLXJ1c3NpYS9yZWZzL2hlYWRzL21haW4vQkxBQ0tfVkxFU1NfUlVT"
+    "X21vYmlsZS50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2lnYXJlY2svdnBu"
+    "LWNvbmZpZ3MtZm9yLXJ1c3NpYS9yZWZzL2hlYWRzL21haW4vV0hJVEUtQ0lEUi1SVS1jaGVja2Vk"
+    "LnR4dApodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vaWdhcmVjay92cG4tY29uZmln"
+    "cy1mb3ItcnVzc2lhL3JlZnMvaGVhZHMvbWFpbi9CTEFDS19WTEVTU19SVVMudHh0Cmh0dHBzOi8v"
+    "cmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9pZ2FyZWNrL3Zwbi1jb25maWdzLWZvci1ydXNzaWEv"
+    "cmVmcy9oZWFkcy9tYWluL0JMQUNLX1NTK0FsbF9SVVMudHh0Cmh0dHBzOi8vcmF3LmdpdGh1YnVz"
+    "ZXJjb250ZW50LmNvbS9Nb3NpZnJlZS8tRlJFRTJDT05GSUcvcmVmcy9oZWFkcy9tYWluL0ZSQUdN"
+    "RU5UCmh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9TaGFkb3dFeGNlcHRpb24vVlBO"
+    "L3JlZnMvaGVhZHMvbWFpbi9jb25maWdzL1ZQTi1jYXQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNv"
+    "bnRlbnQuY29tL0YwcmMzUnVuL0YwcmMzUnVuL21haW4vc3BsaXR0ZWQtYnktcHJvdG9jb2wvdmxl"
+    "c3MudHh0Cmh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9iYXJyeS1mYXIvVjJyYXkt"
+    "Y29uZmlnL21haW4vU3ViMS50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2Jh"
+    "cnJ5LWZhci9WMnJheS1Db25maWcvbWFpbi9TdWIyLnR4dApodHRwczovL3Jhdy5naXRodWJ1c2Vy"
+    "Y29udGVudC5jb20vYmFycnktZmFyL1YycmF5LUNvbmZpZy9tYWluL1N1YjMudHh0Cmh0dHBzOi8v"
+    "cmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9lYnJhc2hhL2ZyZWUtdjJyYXktcHVibGljLWxpc3Qv"
+    "cmVmcy9oZWFkcy9tYWluL1YyUmF5LUNvbmZpZy1CeS1FYnJhU2hhLnR4dApodHRwczovL3Jhdy5n"
+    "aXRodWJ1c2VyY29udGVudC5jb20vTW9oYW1tYWRCYWhlbW1hdC9WMnJheS1Db2xsZWN0b3IvbWFp"
+    "bi9zdWJzY3JpcHRpb25zL2FsbC50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29t"
+    "L0FMSUlMQVBSTy92MnJheU5HLUNvbmZpZy9tYWluL3N1Yi50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVi"
+    "dXNlcmNvbnRlbnQuY29tL21haGRpYmxhbmQvVjJSYXlBZ2dyZWdhdG9yL21hc3Rlci9zdWIvc3Vi"
+    "X21lcmdlLnR4dApodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vUGF3ZHJvaWQvRnJl"
+    "ZS1zZXJ2ZXJzL21haW4vc3ViCmh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9tZnV1"
+    "L3YycmF5L21hc3Rlci92MnJheS50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29t"
+    "L2VybWFvemkvZ2V0X3N1YnNjcmliZS9tYWluL3N1YnNjcmliZS92MnJheS50eHQKaHR0cHM6Ly9t"
+    "aWZhLndvcmxkL3NzCmh0dHBzOi8vbWlmYS53b3JsZC90cm9qYW4KaHR0cHM6Ly9taWZhLndvcmxk"
+    "L2h5c3RlcmlhCmh0dHBzOi8vbWlmYS53b3JsZC9vdGhlcgpodHRwczovL21pZmEud29ybGQvdm1l"
+    "c3MKaHR0cHM6Ly9taWZhLndvcmxkL3ZsZXNzCmh0dHBzOi8vZW1wdHktbW91c2UtZmJiNy5hbGl6"
+    "YXJlaDQwMjQud29ya2Vycy5kZXYvc3luYz9zdWI9JUQ4JUIzJUQ5JTg4JUQ4JUIzJUQ5JTg1JUQ4"
+    "JUE3JUQ4JUIxJUYwJTlGJUE2JThFCmh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9w"
+    "eXRpbXVzcHJpbWUvRnJlZVYycmF5L3JlZnMvaGVhZHMvbWFpbi9hbGxfc2VydmVycy50eHQKaHR0"
+    "cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL1Rob21hc0phc3BlcnRoZWNhdC9zdWIvbWFp"
+    "bi9zdWJsaXN0MS50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL21hc2lyLXNl"
+    "ZmlkL1N1Yi9tYWluL0BNYXNpcl9TZWZpZC50eHQKaHR0cHM6Ly9zdWIuaWFtcGVkaTUubGl2ZS9z"
+    "dWIvYmFzZTY0LnR4dApodHRwczovL3N1Yi53aGl0ZWRucy5vbmUvc3ViL21paG9tby55YW1sCmh0"
+    "dHA6Ly9tYWluLnB5dGhhc2gudHIvRlJraDk5eUJHQ2xsTi8wMTczNjYyMC0yMDg2LTRjMGItYTg2"
+    "ZS01MmViZmU2NGRkMTIvI3B5dGhhc2gKaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29t"
+    "L21hc2lyLXNlZmlkL1N1Yi9tYWluL1RlbGVncmFtLUNoYW5uZWwtQE1hc2lyX1NlZmlkLnR4dApo"
+    "dHRwczovL2M2ZXQ4M2ZlMXU5OWxyOGo1dzRzOWl3aWs5NTY1YnF4LnBhZ2VzLmRldi9zdWIvZnJh"
+    "Z21lbnQvZzRsV2dJKiU0MHplaGZvT0VLP2FwcD14cmF5IyVGMCU5RiU5MiVBNiUyMEJQQiUyMEZy"
+    "YWdtZW50Cmh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9BbXlyYXhWUE4tTWFpbi9B"
+    "bXlyYXhWUE4vcmVmcy9oZWFkcy9tYWluL0FteXJheFZQTi50eHQKaHR0cHM6Ly9yYXcuZ2l0aHVi"
+    "dXNlcmNvbnRlbnQuY29tL2Fyc2hpYWNvbXBsdXMvdjJyYXlFeHRyYWN0b3IvcmVmcy9oZWFkcy9t"
+    "YWluL21peC9zdWIuaHRtbApodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vTWFoc2FO"
+    "ZXRDb25maWdUb3BpYy9jb25maWcvcmVmcy9oZWFkcy9tYWluL3hyYXlfZmluYWwudHh0Cmh0dHBz"
+    "Oi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS8xMGl1bS9mcmVlLWNvbmZpZy9yZWZzL2hlYWRz"
+    "L21haW4vZnJlZS1taWhvbW8tc3ViL011bHRpQ291bnRyeU5vUnVsZS55YW1sCmh0dHBzOi8vcmF3"
+    "LmdpdGh1YnVzZXJjb250ZW50LmNvbS8xMGl1bS9mcmVlLWNvbmZpZy9yZWZzL2hlYWRzL21haW4v"
+    "ZnJlZS1taWhvbW8tc3ViL2ZyZWVkb21faG91c2VfY291bnRyaWVzX19Ob1J1bGUueWFtbApodHRw"
+    "czovL3N1Yi5lbGl0ZXYyLmlyOjg4L3N1Yi9kak1zTkRFc01UYzRNVGM1TkRRNE5nMmViNzA3ZjY0"
+    "OQpodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vaGFtZWRwLTcxL2NsYXNoX25ldy9y"
+    "ZWZzL2hlYWRzL21haW4vaHAueWFtbApodHRwczovL2xvc2UubmV0bmV0MTEuc2hvcDoyMDk2L3N1"
+    "Yi9mMTU1OGUzMy1kODc4LTRiOGEtOGNjMC1lMWM2MTRjYmU1NzkKaHR0cHM6Ly9saW5rLmdyaWRw"
+    "b2ludGdvLmNvbS9hc2FuZXQvZmE1ZTdkZTJkNTYwODVmNjA2OGVlYTAzMzRlMzY2YWIKaHR0cHM6"
+    "Ly9rYXZlaC55ZWJla2hlLndvcmtlcnMuZGV2L3N1Yi9kb25hdGlvbnM="
+)
+
+
+def builtin_sources() -> List[str]:
+    raw = base64.b64decode("".join(_PACKED)).decode("utf-8")
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def builtin_source_count() -> int:
+    return len(builtin_sources())
