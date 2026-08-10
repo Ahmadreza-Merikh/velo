@@ -1,0 +1,70 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate platform project
+        working-directory: app
+        shell: bash
+        run: bash tool/scaffold.sh windows
+
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build app
+        working-directory: app
+        run: flutter build windows --release
+
+      - name: Fetch proxy core and tunnel driver
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod https://api.github.com/repos/XTLS/Xray-core/releases/latest
+          $tag = $release.tag_name
+          Write-Host "using Xray-core $tag"
+          New-Item -ItemType Directory -Force -Path core | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$tag/Xray-windows-64.zip" -OutFile core\xray.zip
+          Expand-Archive -Path core\xray.zip -DestinationPath core\xray -Force
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile core\wintun.zip
+          Expand-Archive -Path core\wintun.zip -DestinationPath core\wintun -Force
+
+      - name: Bundle core next to the app
+        shell: pwsh
+        run: |
+          $target = "app\build\windows\x64\runner\Release"
+          Copy-Item core\xray\xray.exe "$target\xray.exe" -Force
+          Copy-Item core\wintun\wintun\bin\amd64\wintun.dll "$target\wintun.dll" -Force
+          Get-ChildItem $target | Select-Object Name, Length
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path app\build\windows\x64\runner\Release\* -DestinationPath dist\velo-windows.zip -Force
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velo-windows
+          path: dist/*
+          if-no-files-found: error

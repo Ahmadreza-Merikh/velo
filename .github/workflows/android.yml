@@ -1,0 +1,76 @@
+name: android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Fetch xray core library
+        working-directory: app
+        run: |
+          mkdir -p android/app/libs
+          tag=$(curl -sSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "using AndroidLibXrayLite $tag"
+          curl -sSL -o android/app/libs/libv2ray.aar \
+            "https://github.com/2dust/AndroidLibXrayLite/releases/download/$tag/libv2ray.aar"
+          ls -l android/app/libs
+
+      - name: Generate platform project
+        working-directory: app
+        run: bash tool/scaffold.sh android
+
+      - name: Restore xray core library
+        working-directory: app
+        run: |
+          if [ ! -f android/app/libs/libv2ray.aar ]; then
+            tag=$(curl -sSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+            curl -sSL -o android/app/libs/libv2ray.aar \
+              "https://github.com/2dust/AndroidLibXrayLite/releases/download/$tag/libv2ray.aar"
+          fi
+
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build apk
+        working-directory: app
+        run: flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64
+
+      - name: Build universal apk
+        working-directory: app
+        run: flutter build apk --release
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp app/build/app/outputs/flutter-apk/*.apk dist/
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velo-android
+          path: dist/*.apk
+          if-no-files-found: error

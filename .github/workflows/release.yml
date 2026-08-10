@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    uses: ./.github/workflows/android.yml
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+
+  windows:
+    uses: ./.github/workflows/windows.yml
+
+  publish:
+    needs: [android, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Collect files
+        run: |
+          mkdir -p dist
+          find incoming -type f \
+            \( -name '*.apk' -o -name '*.dmg' -o -name '*.zip' \) \
+            -exec cp {} dist/ \;
+          ls -lh dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

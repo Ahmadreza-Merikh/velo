@@ -1,0 +1,75 @@
+name: macos
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate platform project
+        working-directory: app
+        run: bash tool/scaffold.sh macos
+
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build app
+        working-directory: app
+        run: flutter build macos --release
+
+      - name: Build universal proxy core
+        run: |
+          mkdir -p core && cd core
+          tag=$(curl -sSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "using Xray-core $tag"
+          for asset in Xray-macos-arm64-v8a Xray-macos-64; do
+            curl -sSL -o "$asset.zip" \
+              "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset.zip"
+            mkdir -p "$asset" && unzip -q -o "$asset.zip" -d "$asset"
+          done
+          lipo -create \
+            Xray-macos-arm64-v8a/xray \
+            Xray-macos-64/xray \
+            -output xray
+          chmod +x xray
+          lipo -info xray
+
+      - name: Bundle core into the app
+        run: |
+          bundle="app/build/macos/Build/Products/Release/Velo.app"
+          cp core/xray "$bundle/Contents/Resources/xray"
+          chmod +x "$bundle/Contents/Resources/xray"
+          codesign --force --deep --sign - "$bundle"
+          codesign --verify --deep "$bundle" && echo "bundle signature is valid"
+
+      - name: Package
+        run: |
+          mkdir -p dist stage
+          cp -R "app/build/macos/Build/Products/Release/Velo.app" stage/
+          hdiutil create -volname Velo -srcfolder stage -ov -format UDZO dist/velo-macos.dmg
+          cd stage && zip -qry ../dist/velo-macos.zip Velo.app
+          ls -lh ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velo-macos
+          path: dist/*
+          if-no-files-found: error
