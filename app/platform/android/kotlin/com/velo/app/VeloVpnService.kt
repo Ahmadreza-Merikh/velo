@@ -190,7 +190,7 @@ class VeloVpnService : VpnService() {
         val notification = builder
             .setContentTitle("Velo is connected")
             .setContentText(label)
-            .setSmallIcon(android.R.drawable.stat_sys_vpn_ic)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pending)
             .setOngoing(true)
             .build()

@@ -38,12 +38,13 @@ jobs:
 
       - name: Fetch proxy core and tunnel driver
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $release = Invoke-RestMethod https://api.github.com/repos/XTLS/Xray-core/releases/latest
-          $tag = $release.tag_name
+          $tag = gh release view --repo XTLS/Xray-core --json tagName -q .tagName
           Write-Host "using Xray-core $tag"
           New-Item -ItemType Directory -Force -Path core | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/$tag/Xray-windows-64.zip" -OutFile core\xray.zip
+          gh release download $tag --repo XTLS/Xray-core --pattern Xray-windows-64.zip --output core\xray.zip --clobber
           Expand-Archive -Path core\xray.zip -DestinationPath core\xray -Force
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile core\wintun.zip
           Expand-Archive -Path core\wintun.zip -DestinationPath core\wintun -Force

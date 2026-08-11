@@ -30,12 +30,14 @@ jobs:
 
       - name: Fetch xray core library
         working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p android/app/libs
-          tag=$(curl -sSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          tag=$(gh release view --repo 2dust/AndroidLibXrayLite --json tagName -q .tagName)
           echo "using AndroidLibXrayLite $tag"
-          curl -sSL -o android/app/libs/libv2ray.aar \
-            "https://github.com/2dust/AndroidLibXrayLite/releases/download/$tag/libv2ray.aar"
+          gh release download "$tag" --repo 2dust/AndroidLibXrayLite \
+            --pattern libv2ray.aar --output android/app/libs/libv2ray.aar --clobber
           ls -l android/app/libs
 
       - name: Generate platform project
@@ -44,11 +46,14 @@ jobs:
 
       - name: Restore xray core library
         working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ ! -f android/app/libs/libv2ray.aar ]; then
-            tag=$(curl -sSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
-            curl -sSL -o android/app/libs/libv2ray.aar \
-              "https://github.com/2dust/AndroidLibXrayLite/releases/download/$tag/libv2ray.aar"
+            mkdir -p android/app/libs
+            tag=$(gh release view --repo 2dust/AndroidLibXrayLite --json tagName -q .tagName)
+            gh release download "$tag" --repo 2dust/AndroidLibXrayLite \
+              --pattern libv2ray.aar --output android/app/libs/libv2ray.aar --clobber
           fi
 
       - name: Analyze

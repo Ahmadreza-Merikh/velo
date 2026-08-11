@@ -36,13 +36,15 @@ jobs:
         run: flutter build macos --release
 
       - name: Build universal proxy core
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p core && cd core
-          tag=$(curl -sSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          tag=$(gh release view --repo XTLS/Xray-core --json tagName -q .tagName)
           echo "using Xray-core $tag"
           for asset in Xray-macos-arm64-v8a Xray-macos-64; do
-            curl -sSL -o "$asset.zip" \
-              "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset.zip"
+            gh release download "$tag" --repo XTLS/Xray-core \
+              --pattern "$asset.zip" --output "$asset.zip" --clobber
             mkdir -p "$asset" && unzip -q -o "$asset.zip" -d "$asset"
           done
           lipo -create \

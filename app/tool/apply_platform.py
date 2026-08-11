@@ -46,6 +46,15 @@ def android():
     )
     log('manifest installed')
 
+    res_overlay = os.path.join(PLATFORM, 'android', 'res')
+    if os.path.isdir(res_overlay):
+        shutil.copytree(
+            res_overlay,
+            os.path.join(main_dir, 'res'),
+            dirs_exist_ok=True,
+        )
+        log('resources merged')
+
     libs = os.path.join(app_dir, 'libs')
     os.makedirs(libs, exist_ok=True)
     keep = os.path.join(libs, '.gitkeep')
