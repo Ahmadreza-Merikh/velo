@@ -39,6 +39,40 @@ pool, Velo starts over from the sources with a full test run.
 Latency shown for a node is the average of every measurement taken for it, not
 the last one.
 
+## Testing while connected
+
+A test that runs while the tunnel is up is not the same test as one that runs
+while it is down. Left alone, testing node B through a tunnel that already runs
+on node A measures the whole chain from you through A to B and on to the target.
+Everything comes out slower, healthy nodes get thrown away because B refuses the
+datacenter address it sees, and worse, a node you could never reach yourself
+looks fine, wins the scan, and fails the moment it is used.
+
+So before a background round starts, Velo resolves every candidate to an
+address and pins a host route for each one through your physical gateway, in one
+call to the privileged helper. The round then measures every node over your own
+connection, the same as it would with the tunnel down, and the pins come off
+when the round ends. Names are resolved outside the tunnel too, by talking
+directly to a public resolver over a pinned route, and the resolved address is
+handed to the proxy core so it cannot quietly reach a different one. A node
+whose name will not resolve is left in the pool untested rather than counted as
+dead.
+
+Measurements carry the state they were taken in, and the two are never averaged
+together or compared: a number from an idle machine and a number from a machine
+with a tunnel up are different measurements of different things.
+
+Tests that run while connected also run at a lower parallelism than tests on an
+idle machine, so a background round does not slow down the traffic you are
+actually using.
+
+On Android none of the routing work is needed. The app already excludes itself
+from its own tunnel, so its tests go out directly whether or not the tunnel is
+up. The lower parallelism still applies.
+
+In proxy mode there is nothing to isolate, and the tester never reads the system
+proxy settings, so it is unaffected either way.
+
 ## Defaults
 
 | Setting | Default |
@@ -47,6 +81,7 @@ the last one.
 | Timeout per node | 10 seconds |
 | Cycles before reconnect | 1 |
 | Parallel tests | 32 on desktop, 12 on Android |
+| Parallel tests while connected | 8 on desktop, 4 on Android |
 | Node limit per scan | no limit |
 
 All of them can be changed under the tune icon in the top right. The same
@@ -90,6 +125,15 @@ whole address space without replacing your default route. Every route it adds
 is recorded and removed again on disconnect, and a stale set is cleaned up
 before a new tunnel starts.
 
+The same helper pins and unpins the routes a background test round needs. Those
+are kept in their own list, so unpinning them can never take out the route the
+live tunnel is running on, and they are dropped when the tunnel goes down or the
+app next starts.
+
+Velo checks the installed helper against the version it expects, so an update
+that changes what the helper does asks for your password once more. There is
+only ever one helper and one `sudoers` rule.
+
 The app is not signed with an Apple developer certificate, so Gatekeeper will
 complain the first time. Clear the quarantine flag after unpacking:
 
@@ -100,14 +144,20 @@ xattr -cr /Applications/Velo.app
 ### Windows
 
 The tunnel uses Wintun, which needs Administrator to create the adapter. The
-first tunnel connect shows one UAC prompt and registers two scheduled tasks,
-one that brings the tunnel up and one that takes it down. Later connects run
-those tasks and show no prompt. `wintun.dll` ships next to the executable.
+first tunnel connect shows one UAC prompt and registers three scheduled tasks:
+one brings the tunnel up, one takes it down, and one adds and removes the routes
+a background test round needs. Later connects run those tasks and show no
+prompt. `wintun.dll` ships next to the executable.
 
 The bring-up task does the same job as the macOS helper: host route to the node
 through the current gateway, start the core, wait for the `Velo` adapter, give
 it an address, then route both halves of the address space through it. Routes
 go into the active store only, so a reboot clears anything left behind.
+
+The route task reads what to pin from a file Velo writes in its own data
+directory and answers in a file beside it. Test pins are tracked separately from
+the tunnel's own routes and are removed when the round ends or the tunnel stops.
+Updating Velo shows the UAC prompt once more if the tasks it needs have changed.
 
 ### Proxy fallback
 
@@ -164,11 +214,12 @@ subscription you can paste into another client.
 ## A note on privileges
 
 The macOS helper and the Windows scheduled task both run the proxy core as
-root or SYSTEM with a config file that lives in your user directory. Anyone who
-can already write files as your user can therefore influence what the core
-does with those privileges. That is the price of a tunnel without an Apple
-developer certificate or a signed Windows service. If that trade is not one
-you want, leave the full tunnel off and use proxy mode.
+root or SYSTEM with a config file that lives in your user directory, and both
+will add a host route to any address they are handed. Anyone who can already
+write files as your user can therefore influence what the core does with those
+privileges and which addresses bypass the tunnel. That is the price of a tunnel
+without an Apple developer certificate or a signed Windows service. If that
+trade is not one you want, leave the full tunnel off and use proxy mode.
 
 Accepting invalid certificates for sources is off by default. Turning it on
 lets a few feeds load that would otherwise fail, and also means those feeds

@@ -14,6 +14,9 @@ class AndroidEngine implements VeloEngine {
 
   bool _prepared = false;
   int _probeCounter = 0;
+  TestRegime _regime = TestRegime.idle;
+
+  TestRegime get regime => _regime;
 
   int _nextProbePort() {
     _probeCounter = (_probeCounter + 1) % _probePortSpan;
@@ -48,6 +51,22 @@ class AndroidEngine implements VeloEngine {
   }
 
   @override
+  Future<TestRound> beginTestRound(
+    List<Node> nodes, {
+    required Settings settings,
+    required CancelFlag cancel,
+  }) async {
+    final bool up = await isActive;
+    _regime = up ? TestRegime.connected : TestRegime.idle;
+    return TestRound(regime: _regime);
+  }
+
+  @override
+  Future<void> endTestRound() async {
+    _regime = TestRegime.idle;
+  }
+
+  @override
   Future<List<TestOutcome>> testCycle(
     List<Node> nodes, {
     required Settings settings,
@@ -57,17 +76,23 @@ class AndroidEngine implements VeloEngine {
     await prepare();
 
     final List<TestOutcome> outcomes = <TestOutcome>[];
+    final TestRegime regime = _regime;
     int done = 0;
 
     await runPool<Node>(
       nodes,
-      settings.effectiveConcurrency,
+      settings.concurrencyFor(regime),
       (Node node) async {
         TestOutcome outcome;
         if (cancel.cancelled) {
-          outcome = TestOutcome(node: node, ok: false, error: 'cancelled');
+          outcome = TestOutcome(
+            node: node,
+            ok: false,
+            error: 'cancelled',
+            regime: regime,
+          );
         } else {
-          outcome = await _measure(node, settings);
+          outcome = await _measure(node, settings, regime);
         }
         outcomes.add(outcome);
         done += 1;
@@ -79,7 +104,11 @@ class AndroidEngine implements VeloEngine {
     return outcomes;
   }
 
-  Future<TestOutcome> _measure(Node node, Settings settings) async {
+  Future<TestOutcome> _measure(
+    Node node,
+    Settings settings,
+    TestRegime regime,
+  ) async {
     final ParsedLink parsed = parseLink(node.uri);
     final Map<String, dynamic>? outbound = parsed.outbound;
     if (outbound == null) {
@@ -87,6 +116,7 @@ class AndroidEngine implements VeloEngine {
         node: node,
         ok: false,
         error: parsed.error.isEmpty ? 'unsupported link' : parsed.error,
+        regime: regime,
       );
     }
 
@@ -100,17 +130,33 @@ class AndroidEngine implements VeloEngine {
         },
       );
       if (delay == null || delay <= 0) {
-        return TestOutcome(node: node, ok: false, error: 'no response');
+        return TestOutcome(
+          node: node,
+          ok: false,
+          error: 'no response',
+          regime: regime,
+        );
       }
-      return TestOutcome(node: node, ok: true, pingMs: delay.toDouble());
+      return TestOutcome(
+        node: node,
+        ok: true,
+        pingMs: delay.toDouble(),
+        regime: regime,
+      );
     } on PlatformException catch (error) {
       return TestOutcome(
         node: node,
         ok: false,
         error: error.message ?? 'measure failed',
+        regime: regime,
       );
     } catch (_) {
-      return TestOutcome(node: node, ok: false, error: 'measure failed');
+      return TestOutcome(
+        node: node,
+        ok: false,
+        error: 'measure failed',
+        regime: regime,
+      );
     }
   }
 

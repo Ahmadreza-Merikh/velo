@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'models.dart';
 
@@ -584,6 +585,95 @@ List<Node> parseLinks(List<String> uris) {
   return nodes;
 }
 
+const List<String> tunnelDnsServers = <String>['1.1.1.1', '8.8.8.8'];
+
+Map<String, dynamic> withDialAddress(
+  Map<String, dynamic> outbound,
+  String address,
+) {
+  final Object? clone = jsonDecode(jsonEncode(outbound));
+  if (clone is! Map) {
+    return outbound;
+  }
+  final Map<String, dynamic> copy = clone.cast<String, dynamic>();
+  final Object? settings = copy['settings'];
+  if (settings is! Map) {
+    return outbound;
+  }
+
+  String original = '';
+  for (final String key in <String>['vnext', 'servers']) {
+    final Object? list = settings[key];
+    if (list is! List) {
+      continue;
+    }
+    for (final Object? entry in list) {
+      if (entry is! Map) {
+        continue;
+      }
+      final Object? host = entry['address'];
+      if (host is String && host.isNotEmpty) {
+        if (original.isEmpty && InternetAddress.tryParse(host) == null) {
+          original = host;
+        }
+        entry['address'] = address;
+      }
+    }
+  }
+
+  if (original.isEmpty) {
+    return copy;
+  }
+
+  final Object? stream = copy['streamSettings'];
+  if (stream is! Map) {
+    return copy;
+  }
+
+  for (final String key in <String>['tlsSettings', 'realitySettings']) {
+    final Object? security = stream[key];
+    if (security is Map) {
+      final Object? name = security['serverName'];
+      if (name is! String || name.isEmpty) {
+        security['serverName'] = original;
+      }
+    }
+  }
+
+  final Object? ws = stream['wsSettings'];
+  if (ws is Map) {
+    final Object? headers = ws['headers'];
+    if (headers is Map) {
+      final Object? value = headers['Host'];
+      if (value is! String || value.isEmpty) {
+        headers['Host'] = original;
+      }
+    } else {
+      ws['headers'] = <String, dynamic>{'Host': original};
+    }
+  }
+
+  for (final String key in <String>['httpupgradeSettings', 'xhttpSettings']) {
+    final Object? value = stream[key];
+    if (value is Map) {
+      final Object? host = value['host'];
+      if (host is! String || host.isEmpty) {
+        value['host'] = original;
+      }
+    }
+  }
+
+  final Object? http = stream['httpSettings'];
+  if (http is Map) {
+    final Object? hosts = http['host'];
+    if (hosts is! List || hosts.isEmpty) {
+      http['host'] = <String>[original];
+    }
+  }
+
+  return copy;
+}
+
 Map<String, dynamic> probeConfig(Map<String, dynamic> outbound, int httpPort) {
   return <String, dynamic>{
     'log': <String, dynamic>{'loglevel': 'none'},
@@ -620,7 +710,7 @@ Map<String, dynamic> tunnelConfig(
   required int httpPort,
   String tunName = '',
   int mtu = 1500,
-  List<String> dns = const <String>['1.1.1.1', '8.8.8.8'],
+  List<String> dns = tunnelDnsServers,
 }) {
   final List<dynamic> inbounds = <dynamic>[
     <String, dynamic>{
@@ -692,7 +782,7 @@ Map<String, dynamic> tunnelConfig(
 Map<String, dynamic> androidTunnelConfig(
   Map<String, dynamic> outbound, {
   required int socksPort,
-  List<String> dns = const <String>['1.1.1.1', '8.8.8.8'],
+  List<String> dns = tunnelDnsServers,
 }) {
   return <String, dynamic>{
     'log': <String, dynamic>{'loglevel': 'warning'},

@@ -22,6 +22,7 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _timeout;
   late final TextEditingController _recheck;
   late final TextEditingController _concurrency;
+  late final TextEditingController _connectedConcurrency;
   late final TextEditingController _maxNodes;
   late final TextEditingController _socksPort;
   late final TextEditingController _httpPort;
@@ -39,6 +40,11 @@ class _SettingsPageState extends State<SettingsPage> {
     _concurrency = TextEditingController(
       text: _draft.concurrency == 0 ? '' : '${_draft.concurrency}',
     );
+    _connectedConcurrency = TextEditingController(
+      text: _draft.connectedConcurrency == 0
+          ? ''
+          : '${_draft.connectedConcurrency}',
+    );
     _maxNodes = TextEditingController(
       text: _draft.maxNodes == 0 ? '' : '${_draft.maxNodes}',
     );
@@ -53,6 +59,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _timeout.dispose();
     _recheck.dispose();
     _concurrency.dispose();
+    _connectedConcurrency.dispose();
     _maxNodes.dispose();
     _socksPort.dispose();
     _httpPort.dispose();
@@ -70,6 +77,8 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     _draft.recheckCycles = _readInt(_recheck.text, 1, 1, 50);
     _draft.concurrency = _readInt(_concurrency.text, 0, 0, 256);
+    _draft.connectedConcurrency =
+        _readInt(_connectedConcurrency.text, 0, 0, 256);
     _draft.maxNodes = _readInt(_maxNodes.text, 0, 0, 100000);
     _draft.socksPort = _readInt(_socksPort.text, 10808, 1024, 65535);
     _draft.httpPort = _readInt(_httpPort.text, 10809, 1024, 65535);
@@ -127,6 +136,13 @@ class _SettingsPageState extends State<SettingsPage> {
             label: 'Parallel tests',
             hint: '${Settings.platformConcurrency} (automatic)',
             help: 'Leave empty to pick a value that suits this device.',
+          ),
+          _NumberField(
+            controller: _connectedConcurrency,
+            label: 'Parallel tests while connected',
+            hint: '${Settings.platformConnectedConcurrency} (automatic)',
+            help: 'Tests that run while the tunnel is up are kept slow on '
+                'purpose so they do not compete with your own traffic.',
           ),
           _NumberField(
             controller: _maxNodes,

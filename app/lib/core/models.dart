@@ -1,3 +1,5 @@
+enum TestRegime { idle, connected }
+
 class Node {
   Node({
     required this.uri,
@@ -7,6 +9,8 @@ class Node {
     required this.port,
     this.pingMs = 0,
     this.samples = 0,
+    this.tunnelPingMs = 0,
+    this.tunnelSamples = 0,
     this.lastError = '',
     this.used = false,
   });
@@ -19,6 +23,8 @@ class Node {
 
   double pingMs;
   int samples;
+  double tunnelPingMs;
+  int tunnelSamples;
   String lastError;
   bool used;
 
@@ -38,8 +44,19 @@ class Node {
     return '${value.substring(0, 27)}...';
   }
 
-  void recordPing(double value) {
-    if (samples <= 0) {
+  static const double unmeasured = 1000000;
+
+  void recordPing(double value, {TestRegime regime = TestRegime.idle}) {
+    if (regime == TestRegime.connected) {
+      if (tunnelSamples <= 0) {
+        tunnelPingMs = value;
+        tunnelSamples = 1;
+      } else {
+        tunnelPingMs =
+            ((tunnelPingMs * tunnelSamples) + value) / (tunnelSamples + 1);
+        tunnelSamples += 1;
+      }
+    } else if (samples <= 0) {
       pingMs = value;
       samples = 1;
     } else {
@@ -48,6 +65,28 @@ class Node {
     }
     lastError = '';
   }
+
+  double pingIn(TestRegime regime) {
+    if (regime == TestRegime.connected) {
+      return tunnelSamples > 0 ? tunnelPingMs : unmeasured;
+    }
+    return samples > 0 ? pingMs : unmeasured;
+  }
+
+  int samplesIn(TestRegime regime) =>
+      regime == TestRegime.connected ? tunnelSamples : samples;
+
+  double get rankPing {
+    if (samples > 0) {
+      return pingMs;
+    }
+    if (tunnelSamples > 0) {
+      return tunnelPingMs;
+    }
+    return unmeasured;
+  }
+
+  bool get measured => samples > 0 || tunnelSamples > 0;
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
@@ -58,6 +97,8 @@ class Node {
       'port': port,
       'pingMs': pingMs,
       'samples': samples,
+      'tunnelPingMs': tunnelPingMs,
+      'tunnelSamples': tunnelSamples,
       'used': used,
     };
   }
@@ -75,6 +116,8 @@ class Node {
       port: (json['port'] as num?)?.toInt() ?? 0,
       pingMs: (json['pingMs'] as num?)?.toDouble() ?? 0,
       samples: (json['samples'] as num?)?.toInt() ?? 0,
+      tunnelPingMs: (json['tunnelPingMs'] as num?)?.toDouble() ?? 0,
+      tunnelSamples: (json['tunnelSamples'] as num?)?.toInt() ?? 0,
       used: (json['used'] as bool?) ?? false,
     );
   }
@@ -86,12 +129,16 @@ class TestOutcome {
     required this.ok,
     this.pingMs = 0,
     this.error = '',
+    this.regime = TestRegime.idle,
+    this.skipped = false,
   });
 
   final Node node;
   final bool ok;
   final double pingMs;
   final String error;
+  final TestRegime regime;
+  final bool skipped;
 }
 
 enum ConnectPhase {

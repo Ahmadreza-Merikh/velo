@@ -23,6 +23,7 @@ class VeloController extends ChangeNotifier {
 
   ConnectPhase phase = ConnectPhase.idle;
   TunnelMode mode = TunnelMode.tun;
+  TestRegime regime = TestRegime.idle;
   Node? activeNode;
   String status = 'Ready';
   String note = '';
@@ -33,6 +34,7 @@ class VeloController extends ChangeNotifier {
   int tested = 0;
   int testTotal = 0;
   int alive = 0;
+  int skipped = 0;
   int generation = 0;
   DateTime? poolBuiltAt;
 
@@ -257,7 +259,7 @@ class VeloController extends ChangeNotifier {
         await _savePool();
         _setPhase(
           ConnectPhase.connected,
-          '${candidate.shortLabel} at ${candidate.pingMs.round()} ms',
+          '${candidate.shortLabel} at ${candidate.rankPing.round()} ms',
         );
         return;
       } on EngineFailure catch (error) {
@@ -302,33 +304,78 @@ class VeloController extends ChangeNotifier {
     _busy = true;
     _cancel.reset();
     failure = '';
+    note = '';
+
+    final Node? keep = connected ? activeNode : null;
     try {
-      if (connected) {
-        await engine.disconnect();
-        activeNode = null;
-      }
       await engine.prepare(onStatus: (String message) {
         status = message;
         notifyListeners();
       });
-      await _resetPool();
+      await _resetPool(keepActive: keep != null);
       await _fullScan(engine);
+
+      if (keep != null) {
+        Node current = keep;
+        for (final Node node in pool) {
+          if (node.uri == keep.uri) {
+            current = node;
+            break;
+          }
+        }
+        if (!pool.contains(current)) {
+          pool.add(current);
+          await _savePool();
+        }
+        activeNode = current;
+        _setPhase(ConnectPhase.connected, _scanWhileConnectedStatus(current));
+        return;
+      }
+
       _setPhase(
         ConnectPhase.idle,
         pool.isEmpty
             ? 'No working node was found.'
-            : '${pool.length} nodes ready, best ${pool.first.pingMs.round()} ms',
+            : '${pool.length} nodes ready, '
+                'best ${_sortedPool().first.rankPing.round()} ms',
       );
     } on EngineFailure catch (error) {
       failure = error.message;
-      _setPhase(ConnectPhase.error, failure);
+      _setPhase(
+        keep == null ? ConnectPhase.error : ConnectPhase.connected,
+        keep == null ? failure : 'Still on ${keep.shortLabel}',
+      );
     } catch (error) {
       failure = error.toString();
-      _setPhase(ConnectPhase.error, 'Scan failed');
+      _setPhase(
+        keep == null ? ConnectPhase.error : ConnectPhase.connected,
+        keep == null ? 'Scan failed' : 'Still on ${keep.shortLabel}',
+      );
     } finally {
       _busy = false;
       notifyListeners();
     }
+  }
+
+  String _scanWhileConnectedStatus(Node current) {
+    final List<Node> ranked = pool
+        .where((Node node) => node.samplesIn(TestRegime.connected) > 0)
+        .toList();
+    ranked.sort(
+      (Node a, Node b) => a
+          .pingIn(TestRegime.connected)
+          .compareTo(b.pingIn(TestRegime.connected)),
+    );
+    if (ranked.isEmpty) {
+      return 'Still on ${current.shortLabel}';
+    }
+    final Node best = ranked.first;
+    if (best.uri == current.uri) {
+      return '${current.shortLabel} is still the best of ${pool.length}';
+    }
+    return '${pool.length} nodes ready, best '
+        '${best.pingIn(TestRegime.connected).round()} ms, '
+        'still on ${current.shortLabel}';
   }
 
   Future<void> _fullScan(VeloEngine engine) async {
@@ -401,7 +448,31 @@ class VeloController extends ChangeNotifier {
     List<Node> input,
     int cycles,
   ) async {
-    _setPhase(ConnectPhase.testing, 'Testing nodes');
+    _setPhase(ConnectPhase.testing, 'Preparing the test');
+
+    try {
+      final TestRound round = await engine.beginTestRound(
+        input,
+        settings: settings,
+        cancel: _cancel,
+      );
+      regime = round.regime;
+      if (round.regime == TestRegime.connected) {
+        note = round.summary;
+        notifyListeners();
+      }
+      return await _cycleLoop(engine, input, cycles);
+    } finally {
+      await engine.endTestRound();
+      regime = TestRegime.idle;
+    }
+  }
+
+  Future<List<Node>> _cycleLoop(
+    VeloEngine engine,
+    List<Node> input,
+    int cycles,
+  ) async {
     cycleTotal = cycles < 1 ? 1 : cycles;
     List<Node> current = List<Node>.from(input);
 
@@ -414,6 +485,7 @@ class VeloController extends ChangeNotifier {
       tested = 0;
       testTotal = current.length;
       alive = 0;
+      skipped = 0;
       status = 'Cycle $index of $cycleTotal, ${current.length} nodes';
       notifyListeners();
 
@@ -426,6 +498,8 @@ class VeloController extends ChangeNotifier {
           testTotal = total;
           if (outcome.ok) {
             alive += 1;
+          } else if (outcome.skipped) {
+            skipped += 1;
           }
           _throttledNotify();
         },
@@ -436,9 +510,13 @@ class VeloController extends ChangeNotifier {
       }
 
       final List<Node> survivors = <Node>[];
+      int held = 0;
       for (final TestOutcome outcome in outcomes) {
-        if (outcome.ok) {
-          outcome.node.recordPing(outcome.pingMs);
+        if (outcome.skipped) {
+          survivors.add(outcome.node);
+          held += 1;
+        } else if (outcome.ok) {
+          outcome.node.recordPing(outcome.pingMs, regime: outcome.regime);
           survivors.add(outcome.node);
         } else {
           outcome.node.lastError = outcome.error;
@@ -446,32 +524,40 @@ class VeloController extends ChangeNotifier {
       }
 
       current = survivors;
-      alive = survivors.length;
-      status = 'Cycle $index done, ${survivors.length} alive';
+      alive = survivors.length - held;
+      skipped = held;
+      status = held == 0
+          ? 'Cycle $index done, $alive alive'
+          : 'Cycle $index done, $alive alive, $held not tested';
       notifyListeners();
     }
 
-    current.sort((Node a, Node b) => a.pingMs.compareTo(b.pingMs));
+    current.sort(_byPing);
     return current;
   }
 
+  static int _byPing(Node a, Node b) => a.rankPing.compareTo(b.rankPing);
+
   List<Node> _sortedPool() {
     final List<Node> sorted = List<Node>.from(pool);
-    sorted.sort((Node a, Node b) => a.pingMs.compareTo(b.pingMs));
+    sorted.sort(_byPing);
     return sorted;
   }
 
   List<Node> _candidates() {
-    final List<Node> sorted = _sortedPool();
+    final List<Node> sorted =
+        _sortedPool().where((Node node) => node.measured).toList();
     if (!settings.retireNodeAfterUse) {
       return sorted;
     }
     return sorted.where((Node node) => !node.used).toList();
   }
 
-  Future<void> _resetPool() async {
+  Future<void> _resetPool({bool keepActive = false}) async {
     pool = <Node>[];
-    activeNode = null;
+    if (!keepActive) {
+      activeNode = null;
+    }
     await _savePool();
   }
 

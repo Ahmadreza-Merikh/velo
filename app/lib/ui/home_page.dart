@@ -87,7 +87,7 @@ class HomePage extends StatelessWidget {
         if (node == null) {
           return 'Tunnel is up';
         }
-        return '${node.shortLabel}\n${node.pingMs.round()} ms';
+        return '${node.shortLabel}\n${node.rankPing.round()} ms';
       case ConnectPhase.testing:
         return 'cycle ${controller.cycle}/${controller.cycleTotal}\n'
             '${controller.tested}/${controller.testTotal} tested';
@@ -212,7 +212,7 @@ class _StatsRow extends StatelessWidget {
         const SizedBox(width: 12),
         _StatTile(
           label: 'Best ping',
-          value: best == null ? '-' : '${best.pingMs.round()} ms',
+          value: best == null ? '-' : '${best.rankPing.round()} ms',
         ),
         const SizedBox(width: 12),
         _StatTile(
@@ -286,7 +286,9 @@ class _Actions extends StatelessWidget {
         TextButton.icon(
           onPressed: () => controller.rescan(),
           icon: const Icon(Icons.radar, size: 18),
-          label: const Text('Rescan all'),
+          label: Text(
+            controller.connected ? 'Rescan in the background' : 'Rescan all',
+          ),
           style: TextButton.styleFrom(foregroundColor: VeloColors.textMuted),
         ),
       ],

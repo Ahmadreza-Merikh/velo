@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'dns.dart';
 import 'engine.dart';
 import 'link_parser.dart';
 import 'models.dart';
 import 'privileged_helper.dart';
+import 'route_isolation.dart';
 import 'settings.dart';
 import 'store.dart';
 import 'system_proxy.dart';
@@ -20,10 +22,37 @@ class DesktopEngine implements VeloEngine {
   TunnelMode _mode = TunnelMode.proxy;
   bool _helperTunnelRunning = false;
   bool _proxyApplied = false;
+  bool _pinsCleared = false;
+
+  PrivilegedHelper? _helperCache;
+  TestRouteGuard? _guardCache;
+  TestRegime _regime = TestRegime.idle;
+  List<String> _tunnelAddresses = <String>[];
+
+  PrivilegedHelper? get _helper {
+    _helperCache ??= PrivilegedHelper.forPlatform(_store.workDir);
+    return _helperCache;
+  }
+
+  TestRouteGuard? get _guard {
+    final PrivilegedHelper? helper = _helper;
+    if (helper == null) {
+      return null;
+    }
+    _guardCache ??= TestRouteGuard(helper);
+    return _guardCache;
+  }
 
   @override
   Future<void> prepare({void Function(String message)? onStatus}) async {
     _core ??= await XrayBinary.ensure(_store.root, onStatus: onStatus);
+    if (!_pinsCleared) {
+      _pinsCleared = true;
+      final PrivilegedHelper? helper = _helper;
+      if (helper != null && await helper.isInstalled()) {
+        await helper.unpin();
+      }
+    }
   }
 
   File get _coreOrThrow {
@@ -39,6 +68,58 @@ class DesktopEngine implements VeloEngine {
       _tunnel != null || _helperTunnelRunning;
 
   @override
+  Future<TestRound> beginTestRound(
+    List<Node> nodes, {
+    required Settings settings,
+    required CancelFlag cancel,
+  }) async {
+    await endTestRound();
+
+    if (!_helperTunnelRunning || _mode != TunnelMode.tun) {
+      _regime = TestRegime.idle;
+      return TestRound(regime: TestRegime.idle);
+    }
+
+    _regime = TestRegime.connected;
+    final TestRouteGuard? guard = _guard;
+    if (guard == null) {
+      throw EngineFailure(
+        'tests cannot be isolated from the tunnel on this platform',
+      );
+    }
+
+    final List<String> avoid = <String>[
+      ...await systemResolvers(),
+      ...tunnelDnsServers,
+    ];
+    final IsolationReport report = await guard.begin(
+      nodes,
+      avoidResolvers: avoid,
+      tunnelAddresses: _tunnelAddresses,
+      cancel: cancel,
+    );
+    if (!report.ok) {
+      throw EngineFailure(
+        'tests would run through the tunnel: ${report.message}',
+      );
+    }
+
+    return TestRound(
+      regime: TestRegime.connected,
+      isolated: report.pinned,
+      unresolved: report.unresolved,
+      deferred: report.deferred,
+      note: report.message,
+    );
+  }
+
+  @override
+  Future<void> endTestRound() async {
+    await _guardCache?.end();
+    _regime = TestRegime.idle;
+  }
+
+  @override
   Future<List<TestOutcome>> testCycle(
     List<Node> nodes, {
     required Settings settings,
@@ -49,15 +130,21 @@ class DesktopEngine implements VeloEngine {
 
     final List<TestOutcome> outcomes = <TestOutcome>[];
     final Directory work = _store.workDir;
+    final TestRegime regime = _regime;
     int done = 0;
 
     await runPool<Node>(
       nodes,
-      settings.effectiveConcurrency,
+      settings.concurrencyFor(regime),
       (Node node) async {
         final TestOutcome outcome = cancel.cancelled
-            ? TestOutcome(node: node, ok: false, error: 'cancelled')
-            : await _probeNode(node, settings, work);
+            ? TestOutcome(
+                node: node,
+                ok: false,
+                error: 'cancelled',
+                regime: regime,
+              )
+            : await _probeNode(node, settings, work, regime);
         outcomes.add(outcome);
         done += 1;
         onEach?.call(outcome, done, nodes.length);
@@ -72,6 +159,7 @@ class DesktopEngine implements VeloEngine {
     Node node,
     Settings settings,
     Directory work,
+    TestRegime regime,
   ) async {
     final ParsedLink parsed = parseLink(node.uri);
     final Map<String, dynamic>? outbound = parsed.outbound;
@@ -80,7 +168,23 @@ class DesktopEngine implements VeloEngine {
         node: node,
         ok: false,
         error: parsed.error.isEmpty ? 'unsupported link' : parsed.error,
+        regime: regime,
       );
+    }
+
+    Map<String, dynamic> dialled = outbound;
+    if (regime == TestRegime.connected) {
+      final String? address = _guardCache?.dialFor(node.uri);
+      if (address == null) {
+        return TestOutcome(
+          node: node,
+          ok: false,
+          error: 'not isolated from the tunnel',
+          regime: regime,
+          skipped: true,
+        );
+      }
+      dialled = withDialAddress(outbound, address);
     }
 
     Process? process;
@@ -90,22 +194,42 @@ class DesktopEngine implements VeloEngine {
       configFile = File(
         '${work.path}${Platform.pathSeparator}probe_$port.json',
       );
-      await configFile.writeAsString(jsonEncode(probeConfig(outbound, port)));
+      await configFile.writeAsString(jsonEncode(probeConfig(dialled, port)));
 
       process = await _spawnCore(configFile);
 
       final bool up = await _waitForPort(port, const Duration(seconds: 3));
       if (!up) {
-        return TestOutcome(node: node, ok: false, error: 'core did not start');
+        return TestOutcome(
+          node: node,
+          ok: false,
+          error: 'core did not start',
+          regime: regime,
+        );
       }
 
       final double? latency = await _measure(port, settings);
       if (latency == null) {
-        return TestOutcome(node: node, ok: false, error: 'no response');
+        return TestOutcome(
+          node: node,
+          ok: false,
+          error: 'no response',
+          regime: regime,
+        );
       }
-      return TestOutcome(node: node, ok: true, pingMs: latency);
+      return TestOutcome(
+        node: node,
+        ok: true,
+        pingMs: latency,
+        regime: regime,
+      );
     } catch (error) {
-      return TestOutcome(node: node, ok: false, error: _short(error));
+      return TestOutcome(
+        node: node,
+        ok: false,
+        error: _short(error),
+        regime: regime,
+      );
     } finally {
       process?.kill(ProcessSignal.sigkill);
       if (configFile != null && configFile.existsSync()) {
@@ -176,7 +300,7 @@ class DesktopEngine implements VeloEngine {
       );
 
       final List<String> servers = await _resolveServers(outbound);
-      final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+      final PrivilegedHelper? helper = _helper;
       if (helper != null) {
         String failure = '';
         if (!await helper.isInstalled()) {
@@ -196,12 +320,14 @@ class DesktopEngine implements VeloEngine {
           if (started.ok) {
             _helperTunnelRunning = true;
             _mode = TunnelMode.tun;
+            _tunnelAddresses = servers;
             final bool alive = await _verifyTunnel(settings);
             if (alive) {
               return ConnectReport(mode: TunnelMode.tun, node: node);
             }
             await helper.stop();
             _helperTunnelRunning = false;
+            _tunnelAddresses = <String>[];
             failure = 'tunnel came up but carried no traffic';
           } else {
             failure = started.message;
@@ -294,6 +420,8 @@ class DesktopEngine implements VeloEngine {
 
   @override
   Future<void> disconnect() async {
+    await endTestRound();
+
     if (_proxyApplied) {
       await SystemProxy.disable();
       _proxyApplied = false;
@@ -306,12 +434,13 @@ class DesktopEngine implements VeloEngine {
     }
 
     if (_helperTunnelRunning) {
-      final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+      final PrivilegedHelper? helper = _helper;
       if (helper != null) {
         await helper.stop();
       }
       _helperTunnelRunning = false;
     }
+    _tunnelAddresses = <String>[];
   }
 
   @override
@@ -321,8 +450,10 @@ class DesktopEngine implements VeloEngine {
 
   TunnelMode get mode => _mode;
 
+  TestRegime get regime => _regime;
+
   Future<bool> helperInstalled() async {
-    final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+    final PrivilegedHelper? helper = _helper;
     if (helper == null) {
       return false;
     }
@@ -330,7 +461,7 @@ class DesktopEngine implements VeloEngine {
   }
 
   Future<HelperResult> removeHelper() async {
-    final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+    final PrivilegedHelper? helper = _helper;
     if (helper == null) {
       return HelperResult(ok: false, message: 'not supported here');
     }

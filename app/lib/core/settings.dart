@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'models.dart';
+
 class Settings {
   Settings({
     this.cycles = defaultCycles,
     this.timeoutSeconds = defaultTimeoutSeconds,
     this.concurrency = 0,
+    this.connectedConcurrency = 0,
     this.recheckCycles = 1,
     this.useBuiltinSources = true,
     this.tunMode = true,
@@ -24,6 +27,7 @@ class Settings {
   int cycles;
   double timeoutSeconds;
   int concurrency;
+  int connectedConcurrency;
   int recheckCycles;
   bool useBuiltinSources;
   bool tunMode;
@@ -42,11 +46,30 @@ class Settings {
     return 32;
   }
 
+  static int get platformConnectedConcurrency {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return 4;
+    }
+    return 8;
+  }
+
   int get effectiveConcurrency {
     if (concurrency > 0) {
       return concurrency;
     }
     return platformConcurrency;
+  }
+
+  int concurrencyFor(TestRegime regime) {
+    if (regime == TestRegime.idle) {
+      return effectiveConcurrency;
+    }
+    if (connectedConcurrency > 0) {
+      return connectedConcurrency;
+    }
+    final int idle = effectiveConcurrency;
+    final int connected = platformConnectedConcurrency;
+    return connected < idle ? connected : idle;
   }
 
   Duration get timeout =>
@@ -57,6 +80,7 @@ class Settings {
       cycles: cycles,
       timeoutSeconds: timeoutSeconds,
       concurrency: concurrency,
+      connectedConcurrency: connectedConcurrency,
       recheckCycles: recheckCycles,
       useBuiltinSources: useBuiltinSources,
       tunMode: tunMode,
@@ -75,6 +99,7 @@ class Settings {
       'cycles': cycles,
       'timeoutSeconds': timeoutSeconds,
       'concurrency': concurrency,
+      'connectedConcurrency': connectedConcurrency,
       'recheckCycles': recheckCycles,
       'useBuiltinSources': useBuiltinSources,
       'tunMode': tunMode,
@@ -98,6 +123,8 @@ class Settings {
       120,
     );
     settings.concurrency = _clampInt(json['concurrency'], 0, 0, 256);
+    settings.connectedConcurrency =
+        _clampInt(json['connectedConcurrency'], 0, 0, 256);
     settings.recheckCycles = _clampInt(json['recheckCycles'], 1, 1, 50);
     settings.useBuiltinSources =
         (json['useBuiltinSources'] as bool?) ?? settings.useBuiltinSources;

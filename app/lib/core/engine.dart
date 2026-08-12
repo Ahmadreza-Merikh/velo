@@ -36,8 +36,46 @@ class ConnectReport {
   final String note;
 }
 
+class TestRound {
+  TestRound({
+    required this.regime,
+    this.isolated = 0,
+    this.unresolved = 0,
+    this.deferred = 0,
+    this.note = '',
+  });
+
+  final TestRegime regime;
+  final int isolated;
+  final int unresolved;
+  final int deferred;
+  final String note;
+
+  String get summary {
+    if (regime == TestRegime.idle) {
+      return '';
+    }
+    final List<String> parts = <String>['$isolated addresses off the tunnel'];
+    if (unresolved > 0) {
+      parts.add('$unresolved unresolved');
+    }
+    if (deferred > 0) {
+      parts.add('$deferred left for later');
+    }
+    return parts.join(', ');
+  }
+}
+
 abstract class VeloEngine {
   Future<void> prepare({void Function(String message)? onStatus});
+
+  Future<TestRound> beginTestRound(
+    List<Node> nodes, {
+    required Settings settings,
+    required CancelFlag cancel,
+  });
+
+  Future<void> endTestRound();
 
   Future<List<TestOutcome>> testCycle(
     List<Node> nodes, {

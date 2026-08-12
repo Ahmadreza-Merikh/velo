@@ -8,12 +8,14 @@ class HelperResult {
 }
 
 abstract class PrivilegedHelper {
-  static PrivilegedHelper? forPlatform() {
+  static const int contract = 2;
+
+  static PrivilegedHelper? forPlatform(Directory workDir) {
     if (Platform.isMacOS) {
-      return MacHelper();
+      return MacHelper(workDir);
     }
     if (Platform.isWindows) {
-      return WindowsHelper();
+      return WindowsHelper(workDir);
     }
     return null;
   }
@@ -34,14 +36,22 @@ abstract class PrivilegedHelper {
 
   Future<HelperResult> stop();
 
+  Future<HelperResult> pin(List<String> addresses);
+
+  Future<HelperResult> unpin();
+
   Future<HelperResult> uninstall();
 }
 
 class MacHelper implements PrivilegedHelper {
+  MacHelper(this.workDir);
+
   static const String installDir = '/usr/local/libexec/velo';
   static const String helperPath = '$installDir/velo-helper';
   static const String corePath = '$installDir/xray';
   static const String sudoersPath = '/etc/sudoers.d/velo';
+
+  final Directory workDir;
 
   @override
   Future<bool> isInstalled() async {
@@ -52,7 +62,11 @@ class MacHelper implements PrivilegedHelper {
       'sudo',
       <String>['-n', helperPath, 'ping'],
     );
-    return probe.exitCode == 0;
+    if (probe.exitCode != 0) {
+      return false;
+    }
+    return (probe.stdout as String).trim() ==
+        'velo-helper ${PrivilegedHelper.contract}';
   }
 
   @override
@@ -122,6 +136,36 @@ class MacHelper implements PrivilegedHelper {
   }
 
   @override
+  Future<HelperResult> pin(List<String> addresses) async {
+    if (addresses.isEmpty) {
+      return HelperResult(ok: true);
+    }
+    final ProcessResult result = await Process.run('sudo', <String>[
+      '-n',
+      helperPath,
+      'pin',
+      addresses.join(','),
+    ]);
+    if (result.exitCode != 0) {
+      final String error = (result.stderr as String).trim();
+      return HelperResult(
+        ok: false,
+        message: error.isEmpty ? 'could not pin the test routes' : error,
+      );
+    }
+    return HelperResult(ok: true);
+  }
+
+  @override
+  Future<HelperResult> unpin() async {
+    final ProcessResult result = await Process.run(
+      'sudo',
+      <String>['-n', helperPath, 'unpin'],
+    );
+    return HelperResult(ok: result.exitCode == 0);
+  }
+
+  @override
   Future<HelperResult> uninstall() async {
     final ProcessResult result = await Process.run('osascript', <String>[
       '-e',
@@ -155,10 +199,13 @@ chmod 440 '$sudoersPath'
 
   static const String _helperScript = r'''#!/bin/sh
 
+CONTRACT=2
 CORE="/usr/local/libexec/velo/xray"
 PID_FILE="/var/run/velo-tunnel.pid"
 STATE_FILE="/var/run/velo-tunnel.state"
+PIN_FILE="/var/run/velo-pins.state"
 LOG_FILE="/var/log/velo-tunnel.log"
+PIN_LIMIT=1024
 
 kill_core() {
   if [ -f "$PID_FILE" ]; then
@@ -185,13 +232,58 @@ drop_routes() {
   rm -f "$STATE_FILE"
 }
 
+drop_pins() {
+  if [ ! -f "$PIN_FILE" ]; then
+    return 0
+  fi
+  while IFS=' ' read -r kind value; do
+    case "$kind" in
+      host) route -n delete -host "$value" >/dev/null 2>&1 ;;
+      host6) route -n delete -inet6 -host "$value" >/dev/null 2>&1 ;;
+    esac
+  done < "$PIN_FILE"
+  rm -f "$PIN_FILE"
+}
+
 teardown() {
   kill_core
   drop_routes
+  drop_pins
+}
+
+valid_address() {
+  case "$1" in
+    *[!0-9A-Fa-f.:]*) return 1 ;;
+    *[.:]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+held_by_tunnel() {
+  if [ ! -f "$STATE_FILE" ]; then
+    return 1
+  fi
+  while IFS=' ' read -r kind value; do
+    if [ "$value" = "$1" ]; then
+      case "$kind" in
+        host|host6) return 0 ;;
+      esac
+    fi
+  done < "$STATE_FILE"
+  return 1
+}
+
+default_gateway() {
+  route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}'
+}
+
+default_gateway6() {
+  route -n get -inet6 default 2>/dev/null | awk '/gateway:/ {print $2; exit}'
 }
 
 case "$1" in
   ping)
+    echo "velo-helper $CONTRACT"
     exit 0
     ;;
   start)
@@ -218,7 +310,7 @@ case "$1" in
 
     teardown
 
-    GATEWAY=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')
+    GATEWAY=$(default_gateway)
     if [ -z "$GATEWAY" ]; then
       echo "no default gateway, is this machine online" >&2
       exit 3
@@ -276,6 +368,58 @@ case "$1" in
 
     exit 0
     ;;
+  pin)
+    LIST="$2"
+    if [ -z "$LIST" ]; then
+      exit 0
+    fi
+
+    GATEWAY=$(default_gateway)
+    GATEWAY6=$(default_gateway6)
+    if [ -z "$GATEWAY" ] && [ -z "$GATEWAY6" ]; then
+      echo "no default gateway, is this machine online" >&2
+      exit 3
+    fi
+
+    if [ ! -f "$PIN_FILE" ]; then
+      : > "$PIN_FILE"
+      chmod 600 "$PIN_FILE"
+    fi
+    COUNT=$(wc -l < "$PIN_FILE" | tr -d ' ')
+
+    OLD_IFS=$IFS
+    IFS=,
+    for ADDRESS in $LIST; do
+      IFS=$OLD_IFS
+      if [ -n "$ADDRESS" ] && [ "$COUNT" -lt "$PIN_LIMIT" ] &&
+        valid_address "$ADDRESS" && ! held_by_tunnel "$ADDRESS"; then
+        case "$ADDRESS" in
+          *:*)
+            if [ -n "$GATEWAY6" ] &&
+              route -n add -inet6 -host "$ADDRESS" "$GATEWAY6" \
+                >/dev/null 2>&1; then
+              echo "host6 $ADDRESS" >> "$PIN_FILE"
+              COUNT=$((COUNT + 1))
+            fi
+            ;;
+          *)
+            if [ -n "$GATEWAY" ] &&
+              route -n add -host "$ADDRESS" "$GATEWAY" >/dev/null 2>&1; then
+              echo "host $ADDRESS" >> "$PIN_FILE"
+              COUNT=$((COUNT + 1))
+            fi
+            ;;
+        esac
+      fi
+      IFS=,
+    done
+    IFS=$OLD_IFS
+    exit 0
+    ;;
+  unpin)
+    drop_pins
+    exit 0
+    ;;
   stop)
     teardown
     exit 0
@@ -289,7 +433,7 @@ case "$1" in
     exit 0
     ;;
   *)
-    echo "usage: velo-helper ping|start|stop|status" >&2
+    echo "usage: velo-helper ping|start|stop|pin|unpin|status" >&2
     exit 64
     ;;
 esac
@@ -297,9 +441,14 @@ esac
 }
 
 class WindowsHelper implements PrivilegedHelper {
+  WindowsHelper(this.workDir);
+
   static const String startTask = 'Velo\\VeloTunnel';
   static const String stopTask = 'Velo\\VeloTunnelStop';
+  static const String routeTask = 'Velo\\VeloRoute';
   static const String adapterName = 'Velo';
+
+  final Directory workDir;
 
   Directory get dataDir => Directory(
         '${Platform.environment['ProgramData'] ?? 'C:\\ProgramData'}\\Velo',
@@ -307,12 +456,16 @@ class WindowsHelper implements PrivilegedHelper {
 
   String get corePath => '${dataDir.path}\\xray.exe';
 
+  String get requestPath => '${workDir.path}\\route-request.json';
+
+  String get resultPath => '$requestPath.done';
+
   @override
   Future<bool> isInstalled() async {
     if (!File(corePath).existsSync()) {
       return false;
     }
-    for (final String task in <String>[startTask, stopTask]) {
+    for (final String task in <String>[startTask, stopTask, routeTask]) {
       final ProcessResult result = await Process.run(
         'schtasks',
         <String>['/query', '/tn', task],
@@ -333,16 +486,19 @@ class WindowsHelper implements PrivilegedHelper {
     final File wintun = File('${xray.parent.path}\\wintun.dll');
     final File startScript = File('${workDir.path}\\velo-tunnel.ps1');
     final File stopScript = File('${workDir.path}\\velo-stop.ps1');
+    final File routeScript = File('${workDir.path}\\velo-route.ps1');
     final File installer = File('${workDir.path}\\velo-install.ps1');
 
     await startScript.writeAsString(_startScript);
     await stopScript.writeAsString(_stopScript);
+    await routeScript.writeAsString(_routeScript);
     await installer.writeAsString(
       _installerScript(
         stagedCore: xray.path,
         stagedWintun: wintun.existsSync() ? wintun.path : '',
         stagedStart: startScript.path,
         stagedStop: stopScript.path,
+        stagedRoute: routeScript.path,
         configPath: config.path,
       ),
     );
@@ -392,13 +548,83 @@ class WindowsHelper implements PrivilegedHelper {
   }
 
   @override
+  Future<HelperResult> pin(List<String> addresses) async {
+    if (addresses.isEmpty) {
+      return HelperResult(ok: true);
+    }
+    return _route('pin', addresses);
+  }
+
+  @override
+  Future<HelperResult> unpin() => _route('unpin', const <String>[]);
+
+  Future<HelperResult> _route(String action, List<String> addresses) async {
+    final File request = File(requestPath);
+    final File result = File(resultPath);
+    final int seq = DateTime.now().microsecondsSinceEpoch;
+
+    try {
+      if (result.existsSync()) {
+        result.deleteSync();
+      }
+      await request.writeAsString(
+        jsonEncode(<String, dynamic>{
+          'seq': seq,
+          'action': action,
+          'addresses': addresses,
+        }),
+        flush: true,
+      );
+    } catch (_) {
+      return HelperResult(
+        ok: false,
+        message: 'could not write the route request',
+      );
+    }
+
+    final ProcessResult started = await Process.run(
+      'schtasks',
+      <String>['/run', '/tn', routeTask],
+    );
+    if (started.exitCode != 0) {
+      return HelperResult(ok: false, message: 'the route task did not start');
+    }
+
+    final DateTime deadline = DateTime.now().add(const Duration(seconds: 25));
+    while (DateTime.now().isBefore(deadline)) {
+      if (result.existsSync()) {
+        try {
+          final Object? decoded = jsonDecode(await result.readAsString());
+          if (decoded is Map && (decoded['seq'] as num?)?.toInt() == seq) {
+            final String status = (decoded['status'] as String?) ?? '';
+            if (status == 'ok') {
+              return HelperResult(ok: true);
+            }
+            return HelperResult(
+              ok: false,
+              message: 'the route task reported $status',
+            );
+          }
+        } catch (_) {
+          _ignore();
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    return HelperResult(ok: false, message: 'the route task did not answer');
+  }
+
+  static void _ignore() {}
+
+  @override
   Future<HelperResult> uninstall() async {
     final ProcessResult result = await Process.run('powershell', <String>[
       '-NoProfile',
       '-Command',
       'Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList '
           "'-NoProfile','-Command','schtasks /delete /tn \"$startTask\" /f; "
-          "schtasks /delete /tn \"$stopTask\" /f'",
+          "schtasks /delete /tn \"$stopTask\" /f; "
+          "schtasks /delete /tn \"$routeTask\" /f'",
     ]);
     return HelperResult(ok: result.exitCode == 0);
   }
@@ -408,6 +634,7 @@ class WindowsHelper implements PrivilegedHelper {
     required String stagedWintun,
     required String stagedStart,
     required String stagedStop,
+    required String stagedRoute,
     required String configPath,
   }) {
     final String root = dataDir.path;
@@ -430,6 +657,10 @@ class WindowsHelper implements PrivilegedHelper {
     buffer.writeln(
       "Copy-Item -LiteralPath '$stagedStop' "
       "-Destination '$root\\velo-stop.ps1' -Force",
+    );
+    buffer.writeln(
+      "Copy-Item -LiteralPath '$stagedRoute' "
+      "-Destination '$root\\velo-route.ps1' -Force",
     );
     buffer.writeln(
       "\$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest",
@@ -455,6 +686,16 @@ class WindowsHelper implements PrivilegedHelper {
     );
     buffer.writeln(
       "Register-ScheduledTask -TaskName '$stopTask' -Action \$stopAction "
+      "-Principal \$principal -Settings \$settings -Force | Out-Null",
+    );
+    buffer.writeln(
+      "\$routeAction = New-ScheduledTaskAction -Execute 'powershell.exe' "
+      "-Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
+      "-File \"$root\\velo-route.ps1\" -Requests \"$requestPath\"' "
+      "-WorkingDirectory '$root'",
+    );
+    buffer.writeln(
+      "Register-ScheduledTask -TaskName '$routeTask' -Action \$routeAction "
       "-Principal \$principal -Settings \$settings -Force | Out-Null",
     );
     return buffer.toString();
@@ -547,9 +788,91 @@ foreach ($prefix in @('0.0.0.0/1', '128.0.0.0/1')) {
 exit 0
 ''';
 
+  static const String _routeScript = r'''
+param([string]$Requests)
+
+$ErrorActionPreference = 'SilentlyContinue'
+$root = $PSScriptRoot
+$pinPath = Join-Path $root 'pins.json'
+$tunnelPath = Join-Path $root 'state.json'
+$limit = 1024
+
+if (-not $Requests -or -not (Test-Path -LiteralPath $Requests)) { exit 2 }
+
+$request = Get-Content -LiteralPath $Requests -Raw | ConvertFrom-Json
+if (-not $request) { exit 2 }
+$resultPath = "$Requests.done"
+
+function Save-Result([object]$seq, [string]$status, [int]$count) {
+  @{ seq = $seq; status = $status; count = $count } | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath $resultPath -Encoding ASCII
+}
+
+$pinned = @()
+if (Test-Path -LiteralPath $pinPath) {
+  $pinned = @((Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json).routes)
+  $pinned = @($pinned | Where-Object { $_ })
+}
+
+if ($request.action -eq 'unpin') {
+  foreach ($prefix in $pinned) {
+    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+  }
+  Remove-Item -LiteralPath $pinPath -Force
+  Save-Result $request.seq 'ok' 0
+  exit 0
+}
+
+$tunnel = @()
+if (Test-Path -LiteralPath $tunnelPath) {
+  $tunnel = @((Get-Content -LiteralPath $tunnelPath -Raw | ConvertFrom-Json).routes)
+  $tunnel = @($tunnel | Where-Object { $_ })
+}
+
+$default = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
+  Sort-Object RouteMetric | Select-Object -First 1
+if (-not $default) {
+  Save-Result $request.seq 'nogateway' 0
+  exit 3
+}
+
+$added = 0
+foreach ($address in @($request.addresses)) {
+  if (-not $address) { continue }
+  if ($pinned.Count -ge $limit) { break }
+  $prefix = "$address/32"
+  if ($address -like '*:*') { $prefix = "$address/128" }
+  if ($tunnel -contains $prefix) { continue }
+  if ($pinned -contains $prefix) { continue }
+  try {
+    New-NetRoute -DestinationPrefix $prefix -NextHop $default.NextHop `
+      -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore `
+      -ErrorAction Stop | Out-Null
+    $pinned += $prefix
+    $added += 1
+  } catch { }
+}
+
+@{ routes = @($pinned) } | ConvertTo-Json -Compress |
+  Set-Content -LiteralPath $pinPath -Encoding ASCII
+Save-Result $request.seq 'ok' $added
+exit 0
+''';
+
   static const String _stopScript = r'''
 $ErrorActionPreference = 'SilentlyContinue'
 $statePath = Join-Path $PSScriptRoot 'state.json'
+$pinPath = Join-Path $PSScriptRoot 'pins.json'
+
+if (Test-Path -LiteralPath $pinPath) {
+  $pins = @((Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json).routes)
+  foreach ($prefix in $pins) {
+    if ($prefix) {
+      Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+    }
+  }
+  Remove-Item -LiteralPath $pinPath -Force
+}
 
 if (Test-Path -LiteralPath $statePath) {
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
