@@ -1,0 +1,60 @@
+name: verify
+
+on:
+  push:
+    paths:
+      - 'app/lib/core/**'
+      - 'app/tool/**'
+      - '.github/scripts/**'
+      - '.github/workflows/verify.yml'
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  mac-helper:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise the helper against a real route table
+        run: bash .github/scripts/check_mac_helper.sh
+
+  windows-route:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise the route task against a real route table
+        shell: pwsh
+        run: .github/scripts/check_windows_route.ps1
+
+  ipv6-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Fetch dependencies
+        working-directory: app
+        run: flutter pub get
+      - name: Exercise the ipv6 escape check
+        working-directory: app
+        run: dart run tool/ipv6_probe.dart
+
+  core-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the proxy core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo XTLS/Xray-core --json tagName -q .tagName)
+          gh release download "$tag" --repo XTLS/Xray-core \
+            --pattern 'Xray-linux-64.zip' --output core.zip --clobber
+          unzip -q -o core.zip -d core
+          chmod +x core/xray
+          core/xray version
+      - name: The generated tunnel config must reach the tun inbound
+        run: bash .github/scripts/check_core_config.sh
