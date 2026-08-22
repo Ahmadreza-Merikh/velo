@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'dns.dart';
 import 'engine.dart';
+import 'ipv6.dart';
 import 'link_parser.dart';
 import 'models.dart';
 import 'privileged_helper.dart';
@@ -50,7 +51,7 @@ class DesktopEngine implements VeloEngine {
       _pinsCleared = true;
       final PrivilegedHelper? helper = _helper;
       if (helper != null && await helper.isInstalled()) {
-        await helper.unpin();
+        await helper.cleanup();
       }
     }
   }
@@ -323,7 +324,14 @@ class DesktopEngine implements VeloEngine {
             _tunnelAddresses = servers;
             final bool alive = await _verifyTunnel(settings);
             if (alive) {
-              return ConnectReport(mode: TunnelMode.tun, node: node);
+              final Ipv6Check leak = await checkIpv6Escape();
+              return ConnectReport(
+                mode: TunnelMode.tun,
+                node: node,
+                warning: leak.reachable
+                    ? 'ipv6 is still reaching the internet outside the tunnel'
+                    : '',
+              );
             }
             await helper.stop();
             _helperTunnelRunning = false;
@@ -441,6 +449,23 @@ class DesktopEngine implements VeloEngine {
       _helperTunnelRunning = false;
     }
     _tunnelAddresses = <String>[];
+  }
+
+  @override
+  Future<String> routingConflict() async {
+    final PrivilegedHelper? helper = _helper;
+    if (helper == null || !await helper.isInstalled()) {
+      return '';
+    }
+    final GatewayInfo info = await helper.gateway();
+    if (info.blocked) {
+      return 'another vpn is holding the default route '
+          'on ${info.foreignInterface}';
+    }
+    if (!info.found) {
+      return 'could not find your physical network gateway';
+    }
+    return '';
   }
 
   @override

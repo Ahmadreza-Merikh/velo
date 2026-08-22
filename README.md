@@ -73,6 +73,45 @@ up. The lower parallelism still applies.
 In proxy mode there is nothing to isolate, and the tester never reads the system
 proxy settings, so it is unaffected either way.
 
+## IPv6
+
+A tunnel that only claims IPv4 is not a tunnel. If your connection has IPv6 and
+nothing routes it, every IPv6-reachable destination is contacted directly, with
+your real address, outside the tunnel entirely. On Windows that is not an edge
+case: Windows prefers IPv6 over IPv4 whenever both are available, so most of the
+traffic to large sites would take the direct path.
+
+So on macOS and Windows, Velo turns IPv6 off for as long as the tunnel is up.
+The previous setting of every network service is written to disk before anything
+is changed, and put back when the tunnel stops. If Velo is killed rather than
+closed, the next start reads that file and restores what it found, so you are
+never left without IPv6 and without an explanation. A service with a manually
+configured IPv6 address is left alone rather than having its configuration
+thrown away.
+
+Once the tunnel is up Velo checks the result by trying to reach an IPv6 address
+on the internet. If that succeeds, something escaped and Velo says so on the
+main screen. The check is a real connection attempt rather than a reading of
+system settings, because a setting that claims IPv6 is off is not evidence that
+no packet can leave.
+
+Android needs none of this. Its tunnel already claims `::/0` and hands IPv6
+packets to the proxy core like any other traffic, so IPv6 is carried rather than
+leaked. If the system ever refuses that claim on a device that has IPv6, Velo
+refuses to bring the tunnel up rather than run without it.
+
+The `queryStrategy` setting in the generated core config is not part of this. It
+only constrains how the core resolves names of its own accord, and has no effect
+on the routing table or on traffic addressed to a literal IPv6 address.
+
+## When another VPN is running
+
+Velo pins its own routes to your physical gateway, which it finds by reading the
+routing table for a default route that belongs to real hardware. Another VPN
+holding the default route no longer hides that gateway, so Velo can start
+alongside one. If no physical gateway can be found at all, the error says so and
+names the interface that took the default, rather than claiming you are offline.
+
 ## Defaults
 
 | Setting | Default |
@@ -118,7 +157,7 @@ without a password. Connects after that are silent. You can remove both from
 the bottom of the settings screen.
 
 The helper is what does the network plumbing. On connect it pins a host route
-to the node you are connecting to through your normal gateway, so the proxy
+to the node you are connecting to through your physical gateway, so the proxy
 uplink stays off the tunnel, brings the core up, waits for the interface, and
 then routes `0.0.0.0/1` and `128.0.0.0/1` through it. Both halves cover the
 whole address space without replacing your default route. Every route it adds

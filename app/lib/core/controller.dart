@@ -27,6 +27,7 @@ class VeloController extends ChangeNotifier {
   Node? activeNode;
   String status = 'Ready';
   String note = '';
+  String warning = '';
   String failure = '';
 
   int cycle = 0;
@@ -183,6 +184,7 @@ class VeloController extends ChangeNotifier {
     _cancel.reset();
     failure = '';
     note = '';
+    warning = '';
 
     try {
       _setPhase(ConnectPhase.fetching, 'Preparing');
@@ -190,6 +192,7 @@ class VeloController extends ChangeNotifier {
         status = message;
         notifyListeners();
       });
+      warning = await engine.routingConflict();
 
       if (pool.isEmpty) {
         await _fullScan(engine);
@@ -253,6 +256,9 @@ class VeloController extends ChangeNotifier {
         activeNode = candidate;
         mode = report.mode;
         note = report.note;
+        warning = <String>[warning, report.warning]
+            .where((String item) => item.isNotEmpty)
+            .join(' - ');
         if (settings.retireNodeAfterUse) {
           candidate.used = true;
         }
@@ -288,6 +294,7 @@ class VeloController extends ChangeNotifier {
     }
     activeNode = null;
     note = '';
+    warning = '';
     _setPhase(
       ConnectPhase.idle,
       pool.isEmpty
