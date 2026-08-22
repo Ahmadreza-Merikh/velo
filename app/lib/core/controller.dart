@@ -28,6 +28,7 @@ class VeloController extends ChangeNotifier {
   String status = 'Ready';
   String note = '';
   String warning = '';
+  List<String> diagnostics = <String>[];
   String failure = '';
 
   int cycle = 0;
@@ -281,6 +282,15 @@ class VeloController extends ChangeNotifier {
     );
   }
 
+  Future<void> refreshDiagnostics() async {
+    final VeloEngine? engine = _engine;
+    if (engine == null) {
+      return;
+    }
+    diagnostics = await engine.diagnostics();
+    notifyListeners();
+  }
+
   Future<void> disconnect() async {
     final VeloEngine? engine = _engine;
     if (engine == null) {
@@ -466,6 +476,12 @@ class VeloController extends ChangeNotifier {
       regime = round.regime;
       if (round.regime == TestRegime.connected) {
         note = round.summary;
+        if (!round.trustedNames) {
+          warning = <String>[
+            warning,
+            'node names could not be checked over an encrypted resolver',
+          ].where((String item) => item.isNotEmpty).join(' - ');
+        }
         notifyListeners();
       }
       return await _cycleLoop(engine, input, cycles);

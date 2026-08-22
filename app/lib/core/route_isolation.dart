@@ -87,6 +87,39 @@ class ResolvedHost {
   }
 }
 
+class ResolverStats {
+  int secure = 0;
+  int plain = 0;
+  int blind = 0;
+  int absent = 0;
+  int stale = 0;
+  final Map<String, int> byEndpoint = <String, int>{};
+  final Map<String, int> failures = <String, int>{};
+
+  void won(String endpoint) {
+    byEndpoint[endpoint] = (byEndpoint[endpoint] ?? 0) + 1;
+  }
+
+  void lost(String endpoint) {
+    failures[endpoint] = (failures[endpoint] ?? 0) + 1;
+  }
+
+  bool get trustworthy => secure > 0 && plain == 0 && blind == 0;
+
+  List<String> get lines {
+    final List<String> out = <String>[
+      'secure $secure, plain $plain, blind $blind, stale $stale',
+    ];
+    byEndpoint.forEach((String endpoint, int count) {
+      out.add('$endpoint answered $count');
+    });
+    failures.forEach((String endpoint, int count) {
+      out.add('$endpoint failed $count');
+    });
+    return out;
+  }
+}
+
 class ResolverSet {
   const ResolverSet({
     this.secure = const <SecureResolver>[],
@@ -113,10 +146,16 @@ class HostResolver {
   static const int _ttlCeilingSeconds = 86400;
   static const int _absentSeconds = 3600;
   static const int _secureProbeCount = 3;
+  static const Duration _voteWindow = Duration(days: 14);
+  static const Duration _restPeriod = Duration(hours: 6);
 
   final DnsClient _client;
   final DohClient _secure;
   final Map<String, ResolvedHost> _cache = <String, ResolvedHost>{};
+  final Map<String, Map<String, String>> _votes =
+      <String, Map<String, String>>{};
+  final ResolverStats stats = ResolverStats();
+  final Map<String, DateTime> _restAfter = <String, DateTime>{};
 
   ResolverSet _set = const ResolverSet();
   Set<String> _avoided = <String>{};
@@ -126,13 +165,53 @@ class HostResolver {
 
   ResolverSet get resolvers => _set;
 
-  ResolvedHost? cached(String host) {
+  ResolvedHost? cached(String host, {bool allowStale = false}) {
     final ResolvedHost? entry = _cache[host.toLowerCase()];
-    if (entry == null || !entry.fresh) {
+    if (entry == null) {
       return null;
     }
-    return entry;
+    if (entry.fresh) {
+      return entry;
+    }
+    if (!allowStale) {
+      return null;
+    }
+    stats.stale += 1;
+    return ResolvedHost(
+      status: entry.status,
+      v4: entry.v4,
+      v6: entry.v6,
+      expires: entry.expires,
+      confidence: DnsConfidence.plain,
+      agreement: 0,
+    );
   }
+
+  int votesFor(String host) => _liveVotes(host.toLowerCase()).length;
+
+  Set<String> _liveVotes(String key) {
+    final Map<String, String>? held = _votes[key];
+    if (held == null) {
+      return <String>{};
+    }
+    final DateTime edge = DateTime.now().subtract(_voteWindow);
+    final Set<String> live = <String>{};
+    held.forEach((String who, String when) {
+      final DateTime? at = DateTime.tryParse(when);
+      if (at != null && at.isAfter(edge)) {
+        live.add(who);
+      }
+    });
+    return live;
+  }
+
+  void _recordVote(String key, String who) {
+    final Map<String, String> held =
+        _votes.putIfAbsent(key, () => <String, String>{});
+    held[who] = DateTime.now().toIso8601String();
+  }
+
+  void _clearVotes(String key) => _votes.remove(key);
 
   Future<void> load(File store) async {
     if (_loaded) {
@@ -161,6 +240,32 @@ class HostResolver {
       if (network is String) {
         _network = network;
       }
+      final Object? votes = decoded['votes'];
+      if (votes is Map) {
+        votes.forEach((Object? key, Object? value) {
+          if (key is String && value is Map) {
+            final Map<String, String> held = <String, String>{};
+            value.forEach((Object? who, Object? when) {
+              if (who is String && when is String) {
+                held[who] = when;
+              }
+            });
+            if (held.isNotEmpty) {
+              _votes[key] = held;
+            }
+          }
+        });
+      }
+      final Object? rested = decoded['rest'];
+      if (rested is Map) {
+        rested.forEach((Object? key, Object? value) {
+          final DateTime? when =
+              value is String ? DateTime.tryParse(value) : null;
+          if (key is String && when != null) {
+            _restAfter[key] = when;
+          }
+        });
+      }
     } catch (_) {
       return;
     }
@@ -177,15 +282,38 @@ class HostResolver {
         hosts[key] = entry.toJson();
       }
     });
+    final Map<String, dynamic> votes = <String, dynamic>{};
+    _votes.forEach((String key, Map<String, String> held) {
+      final Set<String> live = _liveVotes(key);
+      if (live.isEmpty) {
+        return;
+      }
+      votes[key] = <String, String>{
+        for (final String who in live) who: held[who]!,
+      };
+    });
+    final Map<String, dynamic> rest = <String, dynamic>{};
+    _restAfter.forEach((String key, DateTime when) {
+      if (when.isAfter(DateTime.now())) {
+        rest[key] = when.toIso8601String();
+      }
+    });
     try {
       await store.writeAsString(
-        jsonEncode(<String, dynamic>{'network': _network, 'hosts': hosts}),
+        jsonEncode(<String, dynamic>{
+          'network': _network,
+          'hosts': hosts,
+          'votes': votes,
+          'rest': rest,
+        }),
         flush: true,
       );
     } catch (_) {
       return;
     }
   }
+
+  String _restKey(SecureResolver resolver) => '$_network|${resolver.key}';
 
   void onNetwork(String fingerprint) {
     if (fingerprint == _network) {
@@ -233,16 +361,33 @@ class HostResolver {
       return const ResolverSet();
     }
 
+    final DateTime now = DateTime.now();
+    final List<SecureResolver> tryNow = secureCandidates.where(
+      (SecureResolver item) {
+        final DateTime? rest = _restAfter[_restKey(item)];
+        return rest == null || now.isAfter(rest);
+      },
+    ).toList();
+    final List<SecureResolver> attempt =
+        tryNow.isEmpty ? secureCandidates : tryNow;
+
     final List<bool> secureAlive = await Future.wait(
-      secureCandidates.map((SecureResolver item) async {
+      attempt.map((SecureResolver item) async {
         final DnsAnswer answer = await _secure.lookup(resolverProbeName, item);
         return answer.status == DnsStatus.found && answer.hasAddress;
       }),
     );
     final List<SecureResolver> working = <SecureResolver>[];
-    for (int index = 0; index < secureCandidates.length; index++) {
-      if (secureAlive[index] && working.length < _secureProbeCount) {
-        working.add(secureCandidates[index]);
+    for (int index = 0; index < attempt.length; index++) {
+      final String restKey = _restKey(attempt[index]);
+      if (secureAlive[index]) {
+        _restAfter.remove(restKey);
+        if (working.length < _secureProbeCount) {
+          working.add(attempt[index]);
+        }
+      } else {
+        _restAfter[restKey] = now.add(_restPeriod);
+        stats.lost(attempt[index].hostname);
       }
     }
 
@@ -294,20 +439,31 @@ class HostResolver {
     for (final SecureResolver resolver in set.secure) {
       final DnsAnswer answer = await _secure.lookup(host, resolver);
       if (answer.status == DnsStatus.found) {
-        outcome = _entry(answer, agreement: 1);
+        stats.secure += 1;
+        stats.won(resolver.hostname);
+        _clearVotes(key);
+        outcome = _entry(answer);
         break;
       }
       if (answer.status == DnsStatus.absent) {
-        outcome = await _confirmAbsent(host, resolver, set);
+        stats.won(resolver.hostname);
+        _recordVote(key, resolver.hostname);
+        outcome = await _confirmAbsent(key, host, resolver, set);
         break;
       }
+      stats.lost(resolver.hostname);
     }
 
     if (outcome == null) {
       final DnsAnswer answer = await _client.lookup(host, set.plain);
       if (answer.status == DnsStatus.found) {
+        stats.plain += 1;
         outcome = _entry(answer.withConfidence(DnsConfidence.plain));
       } else {
+        final ResolvedHost? old = cached(key, allowStale: true);
+        if (old != null && old.usable) {
+          return old;
+        }
         outcome = ResolvedHost(
           status: DnsStatus.unreachable,
           v4: const <String>[],
@@ -324,40 +480,44 @@ class HostResolver {
   }
 
   Future<ResolvedHost> _confirmAbsent(
+    String key,
     String host,
     SecureResolver first,
     ResolverSet set,
   ) async {
     for (final SecureResolver other in set.secure) {
-      if (other.address == first.address || other.hostname == first.hostname) {
+      if (other.hostname == first.hostname) {
         continue;
+      }
+      if (_liveVotes(key).length >= 2) {
+        break;
       }
       final DnsAnswer answer = await _secure.lookup(host, other);
       if (answer.status == DnsStatus.found) {
-        return _entry(answer, agreement: 1);
+        stats.secure += 1;
+        stats.won(other.hostname);
+        _clearVotes(key);
+        return _entry(answer);
       }
       if (answer.status == DnsStatus.absent) {
-        return ResolvedHost(
-          status: DnsStatus.absent,
-          v4: const <String>[],
-          v6: const <String>[],
-          expires: DateTime.now().add(const Duration(seconds: _absentSeconds)),
-          confidence: DnsConfidence.secure,
-          agreement: 2,
-        );
+        stats.won(other.hostname);
+        _recordVote(key, other.hostname);
+      } else {
+        stats.lost(other.hostname);
       }
     }
+    stats.absent += 1;
     return ResolvedHost(
       status: DnsStatus.absent,
       v4: const <String>[],
       v6: const <String>[],
       expires: DateTime.now().add(const Duration(seconds: _absentSeconds)),
       confidence: DnsConfidence.secure,
-      agreement: 1,
+      agreement: _liveVotes(key).length,
     );
   }
 
-  ResolvedHost _entry(DnsAnswer answer, {int agreement = 0}) {
+  ResolvedHost _entry(DnsAnswer answer) {
     int seconds = answer.ttlSeconds;
     if (seconds < _ttlFloorSeconds) {
       seconds = _ttlFloorSeconds;
@@ -371,7 +531,6 @@ class HostResolver {
       v6: answer.v6,
       expires: DateTime.now().add(Duration(seconds: seconds)),
       confidence: answer.confidence,
-      agreement: agreement,
     );
   }
 
@@ -385,6 +544,7 @@ class IsolationReport {
     this.unresolved = 0,
     this.deferred = 0,
     this.message = '',
+    this.trusted = true,
   });
 
   final bool ok;
@@ -392,6 +552,7 @@ class IsolationReport {
   final int unresolved;
   final int deferred;
   final String message;
+  final bool trusted;
 }
 
 class TestRouteGuard {
@@ -433,6 +594,9 @@ class TestRouteGuard {
     );
     _active = true;
     final bool blind = resolvers.isEmpty;
+    if (blind) {
+      resolver.stats.blind += 1;
+    }
 
     final Set<String> protected = tunnelAddresses.toSet();
     final Set<String> wanted = <String>{};
@@ -451,7 +615,7 @@ class TestRouteGuard {
         return;
       }
       final ResolvedHost? host = blind
-          ? resolver.cached(node.server)
+          ? resolver.cached(node.server, allowStale: true)
           : await resolver.resolve(node.server, resolvers);
       if (stop.cancelled) {
         return;
@@ -514,6 +678,7 @@ class TestRouteGuard {
       unresolved: unresolved,
       deferred: deferred < 0 ? 0 : deferred,
       message: notes.join('; '),
+      trusted: !blind && resolvers.secure.isNotEmpty,
     );
   }
 

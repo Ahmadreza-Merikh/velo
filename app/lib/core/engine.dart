@@ -45,6 +45,7 @@ class TestRound {
     this.unresolved = 0,
     this.deferred = 0,
     this.note = '',
+    this.trustedNames = true,
   });
 
   final TestRegime regime;
@@ -52,6 +53,7 @@ class TestRound {
   final int unresolved;
   final int deferred;
   final String note;
+  final bool trustedNames;
 
   String get summary {
     if (regime == TestRegime.idle) {
@@ -97,6 +99,8 @@ abstract class VeloEngine {
   Future<bool> get isActive;
 
   Future<String> routingConflict();
+
+  Future<List<String>> diagnostics();
 
   Future<void> shutdown();
 }

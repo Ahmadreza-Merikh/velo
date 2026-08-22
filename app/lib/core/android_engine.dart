@@ -208,6 +208,9 @@ class AndroidEngine implements VeloEngine {
   Future<String> routingConflict() async => '';
 
   @override
+  Future<List<String>> diagnostics() async => <String>[];
+
+  @override
   Future<void> shutdown() async {
     await disconnect();
   }

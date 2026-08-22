@@ -118,6 +118,7 @@ class DesktopEngine implements VeloEngine {
       unresolved: report.unresolved,
       deferred: report.deferred,
       note: report.message,
+      trustedNames: report.trusted,
     );
   }
 
@@ -479,6 +480,15 @@ class DesktopEngine implements VeloEngine {
       _helperTunnelRunning = false;
     }
     _tunnelAddresses = <String>[];
+  }
+
+  @override
+  Future<List<String>> diagnostics() async {
+    final TestRouteGuard? guard = _guardCache;
+    if (guard == null) {
+      return <String>['no test round has run yet'];
+    }
+    return guard.resolver.stats.lines;
   }
 
   @override

@@ -249,10 +249,42 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
           ],
+          const SizedBox(height: 8),
+          const _SectionTitle('Name resolution'),
+          const Text(
+            'Where node names were looked up, and over what transport. Plain '
+            'answers can be tampered with in transit, secure ones cannot.',
+            style: TextStyle(color: VeloColors.textMuted, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: _refreshCounters,
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('Refresh counters'),
+          ),
+          const SizedBox(height: 10),
+          for (final String line in widget.controller.diagnostics)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                line,
+                style: const TextStyle(
+                  color: VeloColors.textMuted,
+                  fontSize: 12,
+                ),
+              ),
+            ),
           const SizedBox(height: 24),
         ],
       ),
     );
+  }
+
+  Future<void> _refreshCounters() async {
+    await widget.controller.refreshDiagnostics();
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _removeHelper() async {
