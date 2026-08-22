@@ -1169,6 +1169,33 @@ $pinPath = Join-Path $root 'pins.json'
 $tunnelPath = Join-Path $root 'state.json'
 $limit = 1024
 
+function Get-PhysicalDefaultRoute {
+  $candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }
+  if (-not $candidates) { return $null }
+  $physical = @()
+  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
+      $physical += $adapter.ifIndex
+    }
+  }
+  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
+  if ($onPhysical.Count -gt 0) {
+    return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
+  }
+  return ($candidates | Sort-Object RouteMetric | Select-Object -First 1)
+}
+
+function Test-ForeignTunnel {
+  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Sort-Object RouteMetric | Select-Object -First 1
+  if (-not $winner) { return $false }
+  $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
+  if (-not $adapter) { return $false }
+  if ($adapter.Name -eq 'Velo') { return $false }
+  return ($adapter.HardwareInterface -ne $true)
+}
+
 if (-not $Requests -or -not (Test-Path -LiteralPath $Requests)) { exit 2 }
 
 $request = Get-Content -LiteralPath $Requests -Raw | ConvertFrom-Json
@@ -1253,33 +1280,6 @@ $tunnel = @()
 if (Test-Path -LiteralPath $tunnelPath) {
   $tunnel = @((Get-Content -LiteralPath $tunnelPath -Raw | ConvertFrom-Json).routes)
   $tunnel = @($tunnel | Where-Object { $_ })
-}
-
-function Get-PhysicalDefaultRoute {
-  $candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }
-  if (-not $candidates) { return $null }
-  $physical = @()
-  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
-    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
-      $physical += $adapter.ifIndex
-    }
-  }
-  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
-  if ($onPhysical.Count -gt 0) {
-    return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
-  }
-  return ($candidates | Sort-Object RouteMetric | Select-Object -First 1)
-}
-
-function Test-ForeignTunnel {
-  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Sort-Object RouteMetric | Select-Object -First 1
-  if (-not $winner) { return $false }
-  $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
-  if (-not $adapter) { return $false }
-  if ($adapter.Name -eq 'Velo') { return $false }
-  return ($adapter.HardwareInterface -ne $true)
 }
 
 $default = Get-PhysicalDefaultRoute

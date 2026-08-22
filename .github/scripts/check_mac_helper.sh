@@ -48,7 +48,7 @@ echo "--- pin adds real routes ---"
 sudo sh "$HELPER" pin "$TARGET_A,$TARGET_B"
 netstat -rn -f inet | grep -q "$TARGET_A" || fail "$TARGET_A was not added to the route table"
 netstat -rn -f inet | grep -q "$TARGET_B" || fail "$TARGET_B was not added to the route table"
-grep -q "host $TARGET_A" "$WORK/pins.state" || fail "$TARGET_A was not recorded"
+sudo grep -q "host $TARGET_A" "$WORK/pins.state" || fail "$TARGET_A was not recorded"
 echo "both routes present and recorded"
 
 echo "--- unpin removes exactly those routes ---"
@@ -62,20 +62,20 @@ echo "--- pin refuses rubbish and protects tunnel routes ---"
 printf 'host %s\n' "$UPLINK" > "$WORK/tunnel.state"
 sudo route -n add -host "$UPLINK" "$GW" >/dev/null 2>&1 || true
 sudo sh "$HELPER" pin "bogus,,$UPLINK,$TARGET_A"
-if grep -q "$UPLINK" "$WORK/pins.state"; then fail "a tunnel-held address was pinned"; fi
-if grep -q "bogus" "$WORK/pins.state"; then fail "a malformed address was pinned"; fi
-grep -q "host $TARGET_A" "$WORK/pins.state" || fail "the good address was not pinned"
+if sudo grep -q "$UPLINK" "$WORK/pins.state"; then fail "a tunnel-held address was pinned"; fi
+if sudo grep -q "bogus" "$WORK/pins.state"; then fail "a malformed address was pinned"; fi
+sudo grep -q "host $TARGET_A" "$WORK/pins.state" || fail "the good address was not pinned"
 echo "rubbish rejected, tunnel route protected"
 
 echo "--- repin moves the tunnel route and drops test pins ---"
 sudo sh "$HELPER" repin
 if [ -f "$WORK/pins.state" ]; then fail "test pins survived repin"; fi
 netstat -rn -f inet | grep -q "$UPLINK" || fail "the tunnel route is gone after repin"
-grep -q "host $UPLINK" "$WORK/tunnel.state" || fail "the tunnel route was not recorded after repin"
+sudo grep -q "host $UPLINK" "$WORK/tunnel.state" || fail "the tunnel route was not recorded after repin"
 echo "tunnel route re-pinned, test pins dropped"
 
 sudo route -n delete -host "$UPLINK" >/dev/null 2>&1 || true
-rm -f "$WORK/tunnel.state"
+sudo rm -f "$WORK/tunnel.state"
 
 echo "--- ipv6 is really turned off and really restored ---"
 BEFORE=$(networksetup -getinfo Wi-Fi 2>/dev/null | awk -F': ' '/^IPv6:/ {print $2}')
