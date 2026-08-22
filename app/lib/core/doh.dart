@@ -137,7 +137,7 @@ class DohClient {
     try {
       await queued;
     } catch (_) {
-      // the previous caller's failure is not ours
+      _ignore();
     }
     try {
       return await _exchange(host, type, resolver).timeout(timeout);
@@ -280,6 +280,8 @@ class DohClient {
   void _drop(SecureResolver resolver) {
     _pool.remove(resolver.key)?.close();
   }
+
+  static void _ignore() {}
 
   void close() {
     for (final _Conn conn in _pool.values) {
