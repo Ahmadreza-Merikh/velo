@@ -5,7 +5,9 @@ import '../lib/core/doh.dart';
 
 Future<void> main(List<String> args) async {
   final String host = args.isEmpty ? 'raw.githubusercontent.com' : args.first;
-  final DohClient client = DohClient();
+  final DohClient client = DohClient(
+    onTrouble: (String message) => stdout.writeln('  ! $message'),
+  );
 
   int secure = 0;
   int failed = 0;

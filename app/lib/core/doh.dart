@@ -25,9 +25,10 @@ const List<SecureResolver> secureResolvers = <SecureResolver>[
 ];
 
 class DohClient {
-  DohClient({this.timeout = const Duration(seconds: 6)});
+  DohClient({this.timeout = const Duration(seconds: 6), this.onTrouble});
 
   final Duration timeout;
+  final void Function(String message)? onTrouble;
   final Random _ids = Random();
   final Map<String, HttpClient> _clients = <String, HttpClient>{};
 
@@ -84,6 +85,7 @@ class DohClient {
       final HttpClientResponse response = await request.close().timeout(timeout);
       if (response.statusCode != 200) {
         await response.drain<void>();
+        onTrouble?.call('${resolver.hostname} answered ${response.statusCode}');
         return null;
       }
       final BytesBuilder collected = BytesBuilder(copy: false);
@@ -98,7 +100,8 @@ class DohClient {
         return null;
       }
       return reply;
-    } catch (_) {
+    } catch (error) {
+      onTrouble?.call('${resolver.hostname}: $error');
       return null;
     }
   }
