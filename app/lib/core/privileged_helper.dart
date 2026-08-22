@@ -1215,7 +1215,7 @@ if (Test-Path -LiteralPath $pinPath) {
 
 if ($request.action -eq 'repin') {
   foreach ($prefix in $pinned) {
-    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $pinPath -Force
   $default = Get-PhysicalDefaultRoute
@@ -1230,7 +1230,7 @@ if ($request.action -eq 'repin') {
       if (-not $prefix) { continue }
       if ($prefix -like '*/32' -and $prefix -notlike '0.0.0.0/*' -and
         $prefix -notlike '128.0.0.0/*') {
-        Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+        Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
         try {
           New-NetRoute -DestinationPrefix $prefix -NextHop $default.NextHop `
             -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore `
@@ -1250,7 +1250,7 @@ if ($request.action -eq 'repin') {
 
 if ($request.action -eq 'unpin' -or $request.action -eq 'cleanup') {
   foreach ($prefix in $pinned) {
-    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $pinPath -Force
   if ($request.action -eq 'cleanup') {
@@ -1334,7 +1334,7 @@ if (Test-Path -LiteralPath $pinPath) {
   $pins = @((Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json).routes)
   foreach ($prefix in $pins) {
     if ($prefix) {
-      Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+      Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
     }
   }
   Remove-Item -LiteralPath $pinPath -Force
@@ -1346,7 +1346,7 @@ if (Test-Path -LiteralPath $statePath) {
     Stop-Process -Id $state.pid -Force
   }
   foreach ($prefix in $state.routes) {
-    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $statePath -Force
 } else {
