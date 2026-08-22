@@ -1,6 +1,12 @@
 name: dns
 
 on:
+  push:
+    paths:
+      - 'app/lib/core/dns.dart'
+      - 'app/lib/core/doh.dart'
+      - 'app/tool/doh_probe.dart'
+      - '.github/workflows/dns.yml'
   pull_request:
     paths:
       - 'app/lib/core/dns.dart'
