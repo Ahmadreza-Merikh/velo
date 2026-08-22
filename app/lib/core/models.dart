@@ -86,6 +86,16 @@ class Node {
     return unmeasured;
   }
 
+  TestRegime? get rankRegime {
+    if (samples > 0) {
+      return TestRegime.idle;
+    }
+    if (tunnelSamples > 0) {
+      return TestRegime.connected;
+    }
+    return null;
+  }
+
   bool get measured => samples > 0 || tunnelSamples > 0;
 
   Map<String, dynamic> toJson() {

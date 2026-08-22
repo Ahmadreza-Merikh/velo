@@ -7,6 +7,7 @@ import 'engine.dart';
 import 'ipv6.dart';
 import 'link_parser.dart';
 import 'models.dart';
+import 'network_watch.dart';
 import 'privileged_helper.dart';
 import 'route_isolation.dart';
 import 'settings.dart';
@@ -30,6 +31,9 @@ class DesktopEngine implements VeloEngine {
   TestRouteGuard? _guardCache;
   TestRegime _regime = TestRegime.idle;
   List<String> _tunnelAddresses = <String>[];
+  final NetworkWatch _watch = NetworkWatch();
+  bool _roundVoided = false;
+  CancelFlag? _roundCancel;
 
   PrivilegedHelper? get _helper {
     _helperCache ??= PrivilegedHelper.forPlatform(_store.workDir);
@@ -84,6 +88,7 @@ class DesktopEngine implements VeloEngine {
     }
 
     _regime = TestRegime.connected;
+    _roundVoided = false;
     final TestRouteGuard? guard = _guard;
     if (guard == null) {
       throw EngineFailure(
@@ -111,6 +116,9 @@ class DesktopEngine implements VeloEngine {
         'tests would run through the tunnel: ${report.message}',
       );
     }
+
+    _roundCancel = cancel;
+    await _watch.start(_networkMoved);
 
     return TestRound(
       regime: TestRegime.connected,
@@ -146,7 +154,32 @@ class DesktopEngine implements VeloEngine {
   }
 
   @override
+  bool get roundVoided => _roundVoided;
+
+  void _networkMoved() {
+    if (_regime != TestRegime.connected) {
+      return;
+    }
+    _roundVoided = true;
+    _roundCancel?.cancel();
+    unawaited(_recoverFromMove());
+  }
+
+  Future<void> _recoverFromMove() async {
+    final PrivilegedHelper? helper = _helper;
+    if (helper == null) {
+      return;
+    }
+    await helper.unpin();
+    if (_helperTunnelRunning && _tunnelAddresses.isNotEmpty) {
+      await helper.repin();
+    }
+  }
+
+  @override
   Future<void> endTestRound() async {
+    await _watch.stop();
+    _roundCancel = null;
     await _guardCache?.end();
     _regime = TestRegime.idle;
   }
@@ -480,6 +513,18 @@ class DesktopEngine implements VeloEngine {
       _helperTunnelRunning = false;
     }
     _tunnelAddresses = <String>[];
+  }
+
+  @override
+  Future<String> privilegeNeeded() async {
+    final PrivilegedHelper? helper = _helper;
+    if (helper == null || await helper.isInstalled()) {
+      return '';
+    }
+    if (await helper.isPresent()) {
+      return 'upgrade';
+    }
+    return 'install';
   }
 
   @override

@@ -26,7 +26,7 @@ class GatewayInfo {
 }
 
 abstract class PrivilegedHelper {
-  static const int contract = 3;
+  static const int contract = 4;
 
   static PrivilegedHelper? forPlatform(Directory workDir) {
     if (Platform.isMacOS) {
@@ -39,6 +39,8 @@ abstract class PrivilegedHelper {
   }
 
   Future<bool> isInstalled();
+
+  Future<bool> isPresent();
 
   Future<HelperResult> install({
     required File xray,
@@ -60,6 +62,8 @@ abstract class PrivilegedHelper {
 
   Future<HelperResult> cleanup();
 
+  Future<HelperResult> repin();
+
   Future<GatewayInfo> gateway();
 
   Future<HelperResult> uninstall();
@@ -74,6 +78,10 @@ class MacHelper implements PrivilegedHelper {
   static const String sudoersPath = '/etc/sudoers.d/velo';
 
   final Directory workDir;
+
+  @override
+  Future<bool> isPresent() async =>
+      File(helperPath).existsSync() && File(corePath).existsSync();
 
   @override
   Future<bool> isInstalled() async {
@@ -199,6 +207,18 @@ class MacHelper implements PrivilegedHelper {
   }
 
   @override
+  Future<HelperResult> repin() async {
+    final ProcessResult result = await Process.run(
+      'sudo',
+      <String>['-n', helperPath, 'repin'],
+    );
+    return HelperResult(
+      ok: result.exitCode == 0,
+      foreignTunnel: result.exitCode == 4,
+    );
+  }
+
+  @override
   Future<GatewayInfo> gateway() async {
     final ProcessResult result = await Process.run(
       'sudo',
@@ -266,7 +286,7 @@ chmod 440 '$sudoersPath'
 
   static const String _helperScript = r'''#!/bin/sh
 
-CONTRACT=3
+CONTRACT=4
 CORE="/usr/local/libexec/velo/xray"
 PID_FILE="/var/run/velo-tunnel.pid"
 STATE_FILE="/var/run/velo-tunnel.state"
@@ -585,6 +605,36 @@ case "$1" in
     drop_pins
     exit 0
     ;;
+  repin)
+    GATEWAY=$(default_gateway)
+    if [ -z "$GATEWAY" ]; then
+      no_gateway
+    fi
+    drop_pins
+    if [ ! -f "$STATE_FILE" ]; then
+      exit 0
+    fi
+    TMP="$STATE_FILE.new"
+    : > "$TMP"
+    chmod 600 "$TMP"
+    while IFS=' ' read -r kind value; do
+      case "$kind" in
+        host)
+          route -n delete -host "$value" >/dev/null 2>&1
+          if route -n add -host "$value" "$GATEWAY" >/dev/null 2>&1; then
+            echo "host $value" >> "$TMP"
+          fi
+          ;;
+        *)
+          if [ -n "$kind" ]; then
+            echo "$kind $value" >> "$TMP"
+          fi
+          ;;
+      esac
+    done < "$STATE_FILE"
+    mv "$TMP" "$STATE_FILE"
+    exit 0
+    ;;
   cleanup)
     drop_pins
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
@@ -617,7 +667,7 @@ case "$1" in
     exit 0
     ;;
   *)
-    echo "usage: velo-helper ping|start|stop|pin|unpin|cleanup|gateway|status" >&2
+    echo "usage: velo-helper ping|start|stop|pin|unpin|repin|cleanup|gateway|status" >&2
     exit 64
     ;;
 esac
@@ -643,6 +693,9 @@ class WindowsHelper implements PrivilegedHelper {
   String get requestPath => '${workDir.path}\\route-request.json';
 
   String get resultPath => '$requestPath.done';
+
+  @override
+  Future<bool> isPresent() async => File(corePath).existsSync();
 
   @override
   Future<bool> isInstalled() async {
@@ -744,6 +797,9 @@ class WindowsHelper implements PrivilegedHelper {
 
   @override
   Future<HelperResult> cleanup() => _route('cleanup', const <String>[]);
+
+  @override
+  Future<HelperResult> repin() => _route('repin', const <String>[]);
 
   @override
   Future<GatewayInfo> gateway() async {
@@ -1128,6 +1184,41 @@ $pinned = @()
 if (Test-Path -LiteralPath $pinPath) {
   $pinned = @((Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json).routes)
   $pinned = @($pinned | Where-Object { $_ })
+}
+
+if ($request.action -eq 'repin') {
+  foreach ($prefix in $pinned) {
+    Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+  }
+  Remove-Item -LiteralPath $pinPath -Force
+  $default = Get-PhysicalDefaultRoute
+  if (-not $default) {
+    Save-Result $request.seq 'nogateway' 0
+    exit 3
+  }
+  $kept = @()
+  if (Test-Path -LiteralPath $tunnelPath) {
+    $state = Get-Content -LiteralPath $tunnelPath -Raw | ConvertFrom-Json
+    foreach ($prefix in @($state.routes)) {
+      if (-not $prefix) { continue }
+      if ($prefix -like '*/32' -and $prefix -notlike '0.0.0.0/*' -and
+        $prefix -notlike '128.0.0.0/*') {
+        Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false
+        try {
+          New-NetRoute -DestinationPrefix $prefix -NextHop $default.NextHop `
+            -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore `
+            -ErrorAction Stop | Out-Null
+          $kept += $prefix
+        } catch { }
+      } else {
+        $kept += $prefix
+      }
+    }
+    @{ pid = $state.pid; routes = @($kept) } | ConvertTo-Json |
+      Set-Content -LiteralPath $tunnelPath -Encoding ASCII
+  }
+  Save-Result $request.seq 'ok' $kept.Count
+  exit 0
 }
 
 if ($request.action -eq 'unpin' -or $request.action -eq 'cleanup') {

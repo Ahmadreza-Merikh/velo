@@ -7,10 +7,64 @@ import 'settings_page.dart';
 import 'sources_page.dart';
 import 'theme.dart';
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.controller});
 
   final VeloController controller;
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  VeloController get controller => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    controller.confirmPrivilege = _askForPrivilege;
+  }
+
+  @override
+  void dispose() {
+    controller.confirmPrivilege = null;
+    super.dispose();
+  }
+
+  Future<bool> _askForPrivilege(String kind) async {
+    final bool upgrade = kind == 'upgrade';
+    final String body = upgrade
+        ? 'Velo has been updated and the part of it that builds the tunnel '
+            'changed, so it has to be replaced. Your system will ask for your '
+            'password once. Nothing else is being installed, and this will not '
+            'happen again until another update changes that same part.'
+        : 'Building a tunnel means creating a network interface, and only an '
+            'administrator can do that. Velo installs one small helper for the '
+            'job, so your system will ask for your password once. Later '
+            'connects will not ask again. You can remove the helper from the '
+            'settings screen at any time.';
+    final bool? answer = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(
+          upgrade ? 'Velo needs to replace its helper' : 'Velo needs to '
+              'install a helper',
+        ),
+        content: Text(body),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return answer ?? false;
+  }
 
   @override
   Widget build(BuildContext context) {

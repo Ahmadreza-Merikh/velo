@@ -112,6 +112,44 @@ holding the default route no longer hides that gateway, so Velo can start
 alongside one. If no physical gateway can be found at all, the error says so and
 names the interface that took the default, rather than claiming you are offline.
 
+## Name resolution
+
+Names are looked up over an encrypted connection to a resolver on port 443,
+with the certificate checked against the resolver's own hostname. The address
+Velo connects to is pinned, but the identity it checks is the name, so an
+answer cannot be swapped in transit. A forged answer would otherwise point a
+healthy node at a dead address and get it thrown away.
+
+Answers are cached on disk for hours rather than minutes, and the cache is
+filled in the background while the tunnel is down, so most nodes need no lookup
+at all when a background round runs. Plain unencrypted lookups still exist as a
+fallback, but anything they return is marked as unchecked and can never on its
+own be treated as proof that a node is gone. A name is only treated as dead when
+two separate resolvers say so over the encrypted transport, and that tally is
+kept across cache expiry so it is not reset every hour.
+
+If no encrypted resolver answers at all, the round does not fail. Velo falls
+back to addresses it already has, including expired ones, and says on the main
+screen that names could not be checked. Resolvers that fail are rested for a
+few hours and tried again rather than dropped, and which ones work is
+remembered per network.
+
+The tune screen has a counter view showing where names were resolved and over
+what transport, so it is possible to tell whether the encrypted path is
+actually carrying the work.
+
+## When the network changes
+
+Every pinned route points at a gateway. Move from Wi-Fi to cellular, or pick up
+a new lease, and that gateway is gone, along with the route the running tunnel
+depends on. Velo watches for the change while a background round is running.
+When one happens it stops the round, drops every test route, finds the gateway
+again and re-points the tunnel's own route at it.
+
+Measurements from the interrupted round are thrown away rather than kept. They
+were taken against a gateway that no longer exists, and a partial result from a
+network that has moved is worse than no result.
+
 ## Defaults
 
 | Setting | Default |
@@ -170,8 +208,10 @@ live tunnel is running on, and they are dropped when the tunnel goes down or the
 app next starts.
 
 Velo checks the installed helper against the version it expects, so an update
-that changes what the helper does asks for your password once more. There is
-only ever one helper and one `sudoers` rule.
+that changes what the helper does asks for your password once more. Before that
+happens Velo explains what it is about to do and why, because a password prompt
+appearing out of nowhere after an update is indistinguishable from something
+unpleasant. There is only ever one helper and one `sudoers` rule.
 
 The app is not signed with an Apple developer certificate, so Gatekeeper will
 complain the first time. Clear the quarantine flag after unpacking:

@@ -211,6 +211,12 @@ class AndroidEngine implements VeloEngine {
   Future<List<String>> diagnostics() async => <String>[];
 
   @override
+  bool get roundVoided => false;
+
+  @override
+  Future<String> privilegeNeeded() async => '';
+
+  @override
   Future<void> shutdown() async {
     await disconnect();
   }

@@ -102,6 +102,10 @@ abstract class VeloEngine {
 
   Future<List<String>> diagnostics();
 
+  bool get roundVoided;
+
+  Future<String> privilegeNeeded();
+
   Future<void> shutdown();
 }
 

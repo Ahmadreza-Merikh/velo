@@ -29,6 +29,8 @@ class VeloController extends ChangeNotifier {
   String note = '';
   String warning = '';
   List<String> diagnostics = <String>[];
+  final List<TestOutcome> _pending = <TestOutcome>[];
+  Future<bool> Function(String kind)? confirmPrivilege;
   String failure = '';
 
   int cycle = 0;
@@ -195,6 +197,18 @@ class VeloController extends ChangeNotifier {
       });
       warning = settings.tunMode ? await engine.routingConflict() : '';
 
+      if (settings.tunMode) {
+        final String needed = await engine.privilegeNeeded();
+        final Future<bool> Function(String kind)? ask = confirmPrivilege;
+        if (needed.isNotEmpty && ask != null && !await ask(needed)) {
+          _setPhase(
+            ConnectPhase.idle,
+            'Left the tunnel alone. Velo needs the helper to build one.',
+          );
+          return;
+        }
+      }
+
       if (pool.isEmpty) {
         await _fullScan(engine);
       } else {
@@ -280,6 +294,15 @@ class VeloController extends ChangeNotifier {
       ConnectPhase.error,
       failure.isEmpty ? 'Could not connect' : failure,
     );
+  }
+
+  void _commitPending(bool discard) {
+    if (!discard) {
+      for (final TestOutcome outcome in _pending) {
+        outcome.node.recordPing(outcome.pingMs, regime: outcome.regime);
+      }
+    }
+    _pending.clear();
   }
 
   Future<void> refreshDiagnostics() async {
@@ -484,8 +507,11 @@ class VeloController extends ChangeNotifier {
         }
         notifyListeners();
       }
-      return await _cycleLoop(engine, input, cycles);
+      final List<Node> outcome = await _cycleLoop(engine, input, cycles);
+      _commitPending(engine.roundVoided);
+      return outcome;
     } finally {
+      _commitPending(true);
       await engine.endTestRound();
       regime = TestRegime.idle;
     }
@@ -532,6 +558,13 @@ class VeloController extends ChangeNotifier {
         break;
       }
 
+      if (engine.roundVoided) {
+        _pending.clear();
+        status = 'the network changed, this round was thrown away';
+        notifyListeners();
+        break;
+      }
+
       final List<Node> survivors = <Node>[];
       int held = 0;
       for (final TestOutcome outcome in outcomes) {
@@ -539,7 +572,11 @@ class VeloController extends ChangeNotifier {
           survivors.add(outcome.node);
           held += 1;
         } else if (outcome.ok) {
-          outcome.node.recordPing(outcome.pingMs, regime: outcome.regime);
+          if (outcome.regime == TestRegime.connected) {
+            _pending.add(outcome);
+          } else {
+            outcome.node.recordPing(outcome.pingMs, regime: outcome.regime);
+          }
           survivors.add(outcome.node);
         } else {
           outcome.node.lastError = outcome.error;
