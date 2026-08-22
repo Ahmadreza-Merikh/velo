@@ -163,6 +163,7 @@ class _StatusLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final String note = controller.note;
+    final String warning = controller.warning;
     final String failure = controller.failure;
 
     return Column(
@@ -188,6 +189,15 @@ class _StatusLine extends StatelessWidget {
               note,
               textAlign: TextAlign.center,
               style: const TextStyle(color: VeloColors.warning, fontSize: 12),
+            ),
+          ),
+        if (warning.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              warning,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: VeloColors.danger, fontSize: 12),
             ),
           ),
       ],

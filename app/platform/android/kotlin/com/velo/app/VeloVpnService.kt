@@ -11,6 +11,8 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import java.net.Inet6Address
+import java.net.NetworkInterface
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
@@ -126,6 +128,22 @@ class VeloVpnService : VpnService() {
         }
     }
 
+    private fun hasGlobalIpv6(): Boolean {
+        return try {
+            NetworkInterface.getNetworkInterfaces().asSequence().any { nif ->
+                nif.isUp && !nif.isLoopback &&
+                    nif.inetAddresses.asSequence().any { address ->
+                        address is Inet6Address &&
+                            !address.isLinkLocalAddress &&
+                            !address.isLoopbackAddress &&
+                            (address.getAddress()[0].toInt() and 0xFE) != 0xFC
+                    }
+            }
+        } catch (error: Exception) {
+            false
+        }
+    }
+
     private fun establishTunnel(): ParcelFileDescriptor? {
         val builder = Builder()
             .setMtu(MTU)
@@ -139,7 +157,11 @@ class VeloVpnService : VpnService() {
             builder.addAddress(PRIVATE_ADDRESS_V6, 126)
             builder.addRoute("::", 0)
         } catch (error: IllegalArgumentException) {
-            Log.w(TAG, "ipv6 was not accepted, staying on ipv4")
+            if (hasGlobalIpv6()) {
+                Log.e(TAG, "ipv6 could not be claimed while this device has ipv6", error)
+                return null
+            }
+            Log.w(TAG, "ipv6 was not accepted and this device has none", error)
         }
 
         try {

@@ -29,11 +29,13 @@ class ConnectReport {
     required this.mode,
     required this.node,
     this.note = '',
+    this.warning = '',
   });
 
   final TunnelMode mode;
   final Node node;
   final String note;
+  final String warning;
 }
 
 abstract class VeloEngine {
@@ -55,6 +57,8 @@ abstract class VeloEngine {
   Future<void> disconnect();
 
   Future<bool> get isActive;
+
+  Future<String> routingConflict();
 
   Future<void> shutdown();
 }

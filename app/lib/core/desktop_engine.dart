@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'engine.dart';
+import 'ipv6.dart';
 import 'link_parser.dart';
 import 'models.dart';
 import 'privileged_helper.dart';
@@ -19,11 +20,19 @@ class DesktopEngine implements VeloEngine {
   Process? _tunnel;
   TunnelMode _mode = TunnelMode.proxy;
   bool _helperTunnelRunning = false;
+  bool _stateCleared = false;
   bool _proxyApplied = false;
 
   @override
   Future<void> prepare({void Function(String message)? onStatus}) async {
     _core ??= await XrayBinary.ensure(_store.root, onStatus: onStatus);
+    if (!_stateCleared) {
+      _stateCleared = true;
+      final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+      if (helper != null && await helper.isInstalled()) {
+        await helper.cleanup();
+      }
+    }
   }
 
   File get _coreOrThrow {
@@ -198,7 +207,14 @@ class DesktopEngine implements VeloEngine {
             _mode = TunnelMode.tun;
             final bool alive = await _verifyTunnel(settings);
             if (alive) {
-              return ConnectReport(mode: TunnelMode.tun, node: node);
+              final Ipv6Check leak = await checkIpv6Escape();
+              return ConnectReport(
+                mode: TunnelMode.tun,
+                node: node,
+                warning: leak.reachable
+                    ? 'ipv6 is still reaching the internet outside the tunnel'
+                    : '',
+              );
             }
             await helper.stop();
             _helperTunnelRunning = false;
@@ -312,6 +328,23 @@ class DesktopEngine implements VeloEngine {
       }
       _helperTunnelRunning = false;
     }
+  }
+
+  @override
+  Future<String> routingConflict() async {
+    final PrivilegedHelper? helper = PrivilegedHelper.forPlatform();
+    if (helper == null || !await helper.isInstalled()) {
+      return '';
+    }
+    final GatewayInfo info = await helper.gateway();
+    if (info.blocked) {
+      return 'another vpn is holding the default route '
+          'on ${info.foreignInterface}';
+    }
+    if (!info.found) {
+      return 'could not find your physical network gateway';
+    }
+    return '';
   }
 
   @override

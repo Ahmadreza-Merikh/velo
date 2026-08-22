@@ -1,13 +1,32 @@
 import 'dart:io';
 
 class HelperResult {
-  HelperResult({required this.ok, this.message = ''});
+  HelperResult({required this.ok, this.message = '', this.foreignTunnel = false});
 
   final bool ok;
   final String message;
+  final bool foreignTunnel;
+}
+
+class GatewayInfo {
+  const GatewayInfo({
+    this.gateway = '',
+    this.interfaceName = '',
+    this.foreignInterface = '',
+  });
+
+  final String gateway;
+  final String interfaceName;
+  final String foreignInterface;
+
+  bool get found => gateway.isNotEmpty;
+
+  bool get blocked => foreignInterface.isNotEmpty;
 }
 
 abstract class PrivilegedHelper {
+  static const int contract = 1;
+
   static PrivilegedHelper? forPlatform() {
     if (Platform.isMacOS) {
       return MacHelper();
@@ -34,6 +53,10 @@ abstract class PrivilegedHelper {
 
   Future<HelperResult> stop();
 
+  Future<HelperResult> cleanup();
+
+  Future<GatewayInfo> gateway();
+
   Future<HelperResult> uninstall();
 }
 
@@ -52,7 +75,11 @@ class MacHelper implements PrivilegedHelper {
       'sudo',
       <String>['-n', helperPath, 'ping'],
     );
-    return probe.exitCode == 0;
+    if (probe.exitCode != 0) {
+      return false;
+    }
+    return (probe.stdout as String).trim() ==
+        'velo-helper ${PrivilegedHelper.contract}';
   }
 
   @override
@@ -107,6 +134,7 @@ class MacHelper implements PrivilegedHelper {
       return HelperResult(
         ok: false,
         message: error.isEmpty ? 'tunnel did not start' : error,
+        foreignTunnel: result.exitCode == 4,
       );
     }
     return HelperResult(ok: true);
@@ -119,6 +147,27 @@ class MacHelper implements PrivilegedHelper {
       <String>['-n', helperPath, 'stop'],
     );
     return HelperResult(ok: result.exitCode == 0);
+  }
+
+  @override
+  Future<HelperResult> cleanup() async {
+    final ProcessResult result = await Process.run(
+      'sudo',
+      <String>['-n', helperPath, 'cleanup'],
+    );
+    return HelperResult(ok: result.exitCode == 0);
+  }
+
+  @override
+  Future<GatewayInfo> gateway() async {
+    final ProcessResult result = await Process.run(
+      'sudo',
+      <String>['-n', helperPath, 'gateway'],
+    );
+    if (result.exitCode != 0) {
+      return const GatewayInfo();
+    }
+    return _parseGateway(result.stdout as String);
   }
 
   @override
@@ -155,10 +204,12 @@ chmod 440 '$sudoersPath'
 
   static const String _helperScript = r'''#!/bin/sh
 
+CONTRACT=1
 CORE="/usr/local/libexec/velo/xray"
 PID_FILE="/var/run/velo-tunnel.pid"
 STATE_FILE="/var/run/velo-tunnel.state"
 LOG_FILE="/var/log/velo-tunnel.log"
+V6_FILE="/var/run/velo-ipv6.state"
 
 kill_core() {
   if [ -f "$PID_FILE" ]; then
@@ -185,13 +236,113 @@ drop_routes() {
   rm -f "$STATE_FILE"
 }
 
+physical_default() {
+  netstat -rn -f inet 2>/dev/null | awk '
+    $1 == "default" && $4 !~ /^(utun|ipsec|ppp|tap|tun)/ { print $2, $4; exit }'
+}
+
+default_gateway() {
+  set -- $(physical_default)
+  case "$1" in
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) echo "$1"; return 0 ;;
+  esac
+  if [ -n "$2" ]; then
+    ipconfig getoption "$2" router 2>/dev/null |
+      grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+  fi
+}
+
+default_interface() {
+  netstat -rn -f inet 2>/dev/null | awk '
+    $1 == "default" && $4 !~ /^(utun|ipsec|ppp|tap|tun)/ { print $4; exit }'
+}
+
+winning_interface() {
+  netstat -rn -f inet 2>/dev/null | awk '$1 == "default" { print $4; exit }'
+}
+
+foreign_tunnel() {
+  winning_interface | grep -qE '^(utun|ipsec|ppp|tap|tun)'
+}
+
+no_gateway() {
+  if foreign_tunnel; then
+    echo "another vpn is holding the default route on $(winning_interface), disconnect it and try again" >&2
+    exit 4
+  fi
+  echo "could not find your physical network gateway" >&2
+  exit 3
+}
+
+save_ipv6() {
+  if [ -f "$V6_FILE" ]; then
+    return 0
+  fi
+  TMP="$V6_FILE.new"
+  : > "$TMP"
+  chmod 600 "$TMP"
+  networksetup -listallnetworkservices 2>/dev/null | tail -n +2 |
+    while IFS= read -r SERVICE; do
+      SERVICE=${SERVICE#\*}
+      if [ -z "$SERVICE" ]; then
+        continue
+      fi
+      STATE=$(networksetup -getinfo "$SERVICE" 2>/dev/null |
+        awk -F': ' '/^IPv6:/ {print $2; exit}')
+      if [ -n "$STATE" ]; then
+        printf '%s\t%s\n' "$STATE" "$SERVICE" >> "$TMP"
+      fi
+    done
+  mv "$TMP" "$V6_FILE"
+}
+
+disable_ipv6() {
+  save_ipv6
+  SKIPPED=0
+  TAB=$(printf '\t')
+  while IFS="$TAB" read -r STATE SERVICE; do
+    if [ -z "$SERVICE" ]; then
+      continue
+    fi
+    case "$STATE" in
+      Off) ;;
+      Manual) SKIPPED=$((SKIPPED + 1)) ;;
+      *) networksetup -setv6off "$SERVICE" >/dev/null 2>&1 ;;
+    esac
+  done < "$V6_FILE"
+  if [ "$SKIPPED" -gt 0 ]; then
+    echo "left ipv6 alone on $SKIPPED service(s) with a manual address" >&2
+  fi
+}
+
+restore_ipv6() {
+  if [ ! -f "$V6_FILE" ]; then
+    return 0
+  fi
+  TAB=$(printf '\t')
+  while IFS="$TAB" read -r STATE SERVICE; do
+    if [ -z "$SERVICE" ]; then
+      continue
+    fi
+    case "$STATE" in
+      Off) networksetup -setv6off "$SERVICE" >/dev/null 2>&1 ;;
+      Manual) ;;
+      "Link-local only") networksetup -setv6LinkLocal "$SERVICE" >/dev/null 2>&1 ;;
+      *) networksetup -setv6automatic "$SERVICE" >/dev/null 2>&1 ;;
+    esac
+  done < "$V6_FILE"
+  rm -f "$V6_FILE"
+}
+
 teardown() {
   kill_core
   drop_routes
+  restore_ipv6
 }
 
 case "$1" in
   ping)
+    echo "velo-helper $CONTRACT"
     exit 0
     ;;
   start)
@@ -218,10 +369,9 @@ case "$1" in
 
     teardown
 
-    GATEWAY=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')
+    GATEWAY=$(default_gateway)
     if [ -z "$GATEWAY" ]; then
-      echo "no default gateway, is this machine online" >&2
-      exit 3
+      no_gateway
     fi
 
     : > "$STATE_FILE"
@@ -274,10 +424,30 @@ case "$1" in
       fi
     done
 
+    disable_ipv6
+
     exit 0
     ;;
   stop)
     teardown
+    exit 0
+    ;;
+  cleanup)
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+      echo "tunnel is still running, leaving ipv6 alone" >&2
+    else
+      restore_ipv6
+    fi
+    exit 0
+    ;;
+  gateway)
+    echo "gateway=$(default_gateway)"
+    echo "interface=$(default_interface)"
+    if foreign_tunnel; then
+      echo "foreign=$(winning_interface)"
+    else
+      echo "foreign="
+    fi
     exit 0
     ;;
   status)
@@ -289,7 +459,7 @@ case "$1" in
     exit 0
     ;;
   *)
-    echo "usage: velo-helper ping|start|stop|status" >&2
+    echo "usage: velo-helper ping|start|stop|cleanup|gateway|status" >&2
     exit 64
     ;;
 esac
@@ -390,6 +560,84 @@ class WindowsHelper implements PrivilegedHelper {
     await Process.run('schtasks', <String>['/end', '/tn', startTask]);
     return HelperResult(ok: true);
   }
+
+  @override
+  Future<HelperResult> cleanup() async {
+    final ProcessResult result = await Process.run('powershell', <String>[
+      '-NoProfile',
+      '-Command',
+      _restoreQuery,
+    ]);
+    return HelperResult(ok: result.exitCode == 0);
+  }
+
+  @override
+  Future<GatewayInfo> gateway() async {
+    final ProcessResult result = await Process.run('powershell', <String>[
+      '-NoProfile',
+      '-Command',
+      _gatewayQuery,
+    ]);
+    if (result.exitCode != 0) {
+      return const GatewayInfo();
+    }
+    return _parseGateway(result.stdout as String);
+  }
+
+  static const String _gatewayQuery = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+$candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
+  Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' }
+$physical = @()
+foreach ($adapter in (Get-NetAdapter)) {
+  if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
+    $physical += $adapter.ifIndex
+  }
+}
+$pick = @($candidates | Where-Object { $physical -contains $_.ifIndex } |
+  Sort-Object RouteMetric | Select-Object -First 1)
+if ($pick.Count -gt 0) {
+  $adapter = Get-NetAdapter -InterfaceIndex $pick[0].ifIndex
+  Write-Output "gateway=$($pick[0].NextHop)"
+  Write-Output "interface=$($adapter.Name)"
+} else {
+  Write-Output 'gateway='
+  Write-Output 'interface='
+}
+$winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
+  Sort-Object RouteMetric | Select-Object -First 1
+$foreign = ''
+if ($winner) {
+  $winAdapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex
+  if ($winAdapter -and $winAdapter.Name -ne 'Velo' -and
+    $winAdapter.HardwareInterface -ne $true) {
+    $foreign = $winAdapter.Name
+  }
+}
+Write-Output "foreign=$foreign"
+''';
+
+  static const String _restoreQuery = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+$v6Path = Join-Path ($env:ProgramData + '\Velo') 'ipv6.json'
+if (-not (Test-Path -LiteralPath $v6Path)) { exit 0 }
+$statePath = Join-Path ($env:ProgramData + '\Velo') 'state.json'
+$live = $false
+if (Test-Path -LiteralPath $statePath) {
+  $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+  if ($state.pid -and $state.pid -gt 0 -and
+    (Get-Process -Id $state.pid -ErrorAction SilentlyContinue)) {
+    $live = $true
+  }
+}
+if ($live) { exit 0 }
+foreach ($entry in (Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json).bindings) {
+  if ($entry.enabled) {
+    Enable-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+  }
+}
+Remove-Item -LiteralPath $v6Path -Force
+''';
 
   @override
   Future<HelperResult> uninstall() async {
@@ -497,9 +745,42 @@ foreach ($item in $hosts) {
 }
 $addresses = $addresses | Select-Object -Unique
 
-$default = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-  Sort-Object RouteMetric | Select-Object -First 1
-if (-not $default) { exit 3 }
+function Get-PhysicalDefaultRoute {
+  $candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }
+  if (-not $candidates) { return $null }
+  $physical = @()
+  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
+      $physical += $adapter.ifIndex
+    }
+  }
+  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
+  if ($onPhysical.Count -gt 0) {
+    return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
+  }
+  return ($candidates | Sort-Object RouteMetric | Select-Object -First 1)
+}
+
+function Test-ForeignTunnel {
+  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Sort-Object RouteMetric | Select-Object -First 1
+  if (-not $winner) { return $false }
+  $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
+  if (-not $adapter) { return $false }
+  if ($adapter.Name -eq 'Velo') { return $false }
+  return ($adapter.HardwareInterface -ne $true)
+}
+
+$default = Get-PhysicalDefaultRoute
+if (-not $default) {
+  if (Test-ForeignTunnel) {
+    Write-Error 'another vpn is holding the default route, disconnect it and try again'
+    exit 4
+  }
+  Write-Error 'could not find your physical network gateway'
+  exit 3
+}
 
 $added = @()
 foreach ($address in $addresses) {
@@ -542,6 +823,21 @@ foreach ($prefix in @('0.0.0.0/1', '128.0.0.0/1')) {
   } catch { }
 }
 
+$v6Path = Join-Path $root 'ipv6.json'
+if (-not (Test-Path -LiteralPath $v6Path)) {
+  $saved = @()
+  foreach ($binding in (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue)) {
+    $saved += @{ name = $binding.Name; enabled = [bool]$binding.Enabled }
+  }
+  @{ bindings = $saved } | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath $v6Path -Encoding ASCII
+}
+foreach ($entry in (Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json).bindings) {
+  if ($entry.enabled) {
+    Disable-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+  }
+}
+
 @{ pid = $process.Id; routes = $added } | ConvertTo-Json |
   Set-Content -LiteralPath $statePath -Encoding ASCII
 exit 0
@@ -550,6 +846,16 @@ exit 0
   static const String _stopScript = r'''
 $ErrorActionPreference = 'SilentlyContinue'
 $statePath = Join-Path $PSScriptRoot 'state.json'
+$v6Path = Join-Path $PSScriptRoot 'ipv6.json'
+
+if (Test-Path -LiteralPath $v6Path) {
+  foreach ($entry in (Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json).bindings) {
+    if ($entry.enabled) {
+      Enable-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+    }
+  }
+  Remove-Item -LiteralPath $v6Path -Force
+}
 
 if (Test-Path -LiteralPath $statePath) {
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
@@ -565,4 +871,30 @@ if (Test-Path -LiteralPath $statePath) {
 }
 exit 0
 ''';
+}
+
+GatewayInfo _parseGateway(String output) {
+  String gateway = '';
+  String interfaceName = '';
+  String foreign = '';
+  for (final String line in output.split('\n')) {
+    final int split = line.indexOf('=');
+    if (split < 0) {
+      continue;
+    }
+    final String key = line.substring(0, split).trim();
+    final String value = line.substring(split + 1).trim();
+    if (key == 'gateway') {
+      gateway = value;
+    } else if (key == 'interface') {
+      interfaceName = value;
+    } else if (key == 'foreign') {
+      foreign = value;
+    }
+  }
+  return GatewayInfo(
+    gateway: gateway,
+    interfaceName: interfaceName,
+    foreignInterface: foreign,
+  );
 }
