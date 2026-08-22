@@ -192,7 +192,7 @@ class VeloController extends ChangeNotifier {
         status = message;
         notifyListeners();
       });
-      warning = await engine.routingConflict();
+      warning = settings.tunMode ? await engine.routingConflict() : '';
 
       if (pool.isEmpty) {
         await _fullScan(engine);
