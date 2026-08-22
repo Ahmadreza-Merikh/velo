@@ -17,27 +17,35 @@ class Ipv6Check {
   bool get contained => !reachable;
 }
 
+Future<bool> _reaches(InternetAddress target, Duration timeout) async {
+  Socket? socket;
+  try {
+    socket = await Socket.connect(target, ipv6ProbePort, timeout: timeout);
+  } catch (_) {
+    return false;
+  }
+  socket.destroy();
+  return true;
+}
+
 Future<Ipv6Check> checkIpv6Escape({
-  Duration timeout = const Duration(seconds: 4),
+  Duration timeout = const Duration(seconds: 2),
   List<String> probes = ipv6Probes,
 }) async {
-  int tried = 0;
+  final List<Future<bool>> attempts = <Future<bool>>[];
   for (final String probe in probes) {
     final InternetAddress? target = InternetAddress.tryParse(probe);
     if (target == null || target.type != InternetAddressType.IPv6) {
       continue;
     }
-    tried += 1;
-    Socket? socket;
-    try {
-      socket = await Socket.connect(target, ipv6ProbePort, timeout: timeout);
-    } catch (_) {
-      socket = null;
-    }
-    if (socket != null) {
-      socket.destroy();
-      return Ipv6Check(reachable: true, tried: tried);
-    }
+    attempts.add(_reaches(target, timeout));
   }
-  return Ipv6Check(reachable: false, tried: tried);
+  if (attempts.isEmpty) {
+    return const Ipv6Check(reachable: false, tried: 0);
+  }
+  final List<bool> results = await Future.wait(attempts);
+  return Ipv6Check(
+    reachable: results.contains(true),
+    tried: attempts.length,
+  );
 }
