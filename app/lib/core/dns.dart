@@ -5,20 +5,84 @@ import 'dart:typed_data';
 
 enum DnsStatus { found, absent, unreachable }
 
+enum DnsConfidence { secure, plain }
+
 class DnsAnswer {
   const DnsAnswer({
     required this.status,
     this.v4 = const <String>[],
     this.v6 = const <String>[],
     this.ttlSeconds = 300,
+    this.confidence = DnsConfidence.plain,
   });
 
   final DnsStatus status;
   final List<String> v4;
   final List<String> v6;
   final int ttlSeconds;
+  final DnsConfidence confidence;
 
   bool get hasAddress => v4.isNotEmpty || v6.isNotEmpty;
+
+  bool get trusted => confidence == DnsConfidence.secure;
+
+  DnsAnswer withConfidence(DnsConfidence value) => DnsAnswer(
+        status: status,
+        v4: v4,
+        v6: v6,
+        ttlSeconds: ttlSeconds,
+        confidence: value,
+      );
+}
+
+class DnsReply {
+  DnsReply(this.id, this.rcode, this.v4, this.v6, this.ttl);
+
+  final int id;
+  final int rcode;
+  final List<String> v4;
+  final List<String> v6;
+  final int ttl;
+}
+
+class DnsWire {
+  static const int typeA = 1;
+  static const int typeAaaa = 28;
+
+  static Uint8List query(int id, String host, int type) {
+    final List<int>? name = DnsClient._encodeName(host);
+    if (name == null) {
+      return Uint8List(0);
+    }
+    return DnsClient._query(id, name, type);
+  }
+
+  static DnsReply? parse(Uint8List data) => DnsClient._parse(data);
+
+  static DnsAnswer classify(DnsReply? a, DnsReply? aaaa) {
+    final List<String> v4 = <String>[...?a?.v4, ...?aaaa?.v4];
+    final List<String> v6 = <String>[...?a?.v6, ...?aaaa?.v6];
+    int ttl = 0;
+    for (final DnsReply? reply in <DnsReply?>[a, aaaa]) {
+      if (reply != null && reply.ttl > 0 && (ttl == 0 || reply.ttl < ttl)) {
+        ttl = reply.ttl;
+      }
+    }
+    if (v4.isNotEmpty || v6.isNotEmpty) {
+      return DnsAnswer(
+        status: DnsStatus.found,
+        v4: DnsClient._unique(v4),
+        v6: DnsClient._unique(v6),
+        ttlSeconds: ttl <= 0 ? 300 : ttl,
+      );
+    }
+    final int rcodeA = a?.rcode ?? -1;
+    final int rcodeAaaa = aaaa?.rcode ?? -1;
+    if (rcodeA == 3 || (rcodeA == 0 && rcodeAaaa == 0)) {
+      return const DnsAnswer(status: DnsStatus.absent);
+    }
+    return const DnsAnswer(status: DnsStatus.unreachable);
+  }
 }
 
 class DnsClient {
@@ -86,7 +150,7 @@ class DnsClient {
         if (packet == null) {
           return;
         }
-        final _Reply? reply = _parse(packet.data);
+        final DnsReply? reply = _parse(packet.data);
         if (reply == null) {
           return;
         }
@@ -198,7 +262,7 @@ class DnsClient {
     return Uint8List.fromList(out);
   }
 
-  static _Reply? _parse(Uint8List data) {
+  static DnsReply? _parse(Uint8List data) {
     if (data.length < 12) {
       return null;
     }
@@ -215,7 +279,7 @@ class DnsClient {
     for (int i = 0; i < questions; i++) {
       cursor = _skipName(data, cursor);
       if (cursor < 0 || cursor + 4 > data.length) {
-        return _Reply(id, rcode, const <String>[], const <String>[], 0);
+        return DnsReply(id, rcode, const <String>[], const <String>[], 0);
       }
       cursor += 4;
     }
@@ -261,7 +325,7 @@ class DnsClient {
       cursor += length;
     }
 
-    return _Reply(id, rcode, v4, v6, ttl);
+    return DnsReply(id, rcode, v4, v6, ttl);
   }
 
   static int _skipName(Uint8List data, int start) {
@@ -280,16 +344,6 @@ class DnsClient {
     }
     return -1;
   }
-}
-
-class _Reply {
-  _Reply(this.id, this.rcode, this.v4, this.v6, this.ttl);
-
-  final int id;
-  final int rcode;
-  final List<String> v4;
-  final List<String> v6;
-  final int ttl;
 }
 
 Future<List<String>> systemResolvers() async {

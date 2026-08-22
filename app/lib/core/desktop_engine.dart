@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -78,6 +79,7 @@ class DesktopEngine implements VeloEngine {
 
     if (!_helperTunnelRunning || _mode != TunnelMode.tun) {
       _regime = TestRegime.idle;
+      unawaited(_warmResolverCache(nodes));
       return TestRound(regime: TestRegime.idle);
     }
 
@@ -93,10 +95,15 @@ class DesktopEngine implements VeloEngine {
       ...await systemResolvers(),
       ...tunnelDnsServers,
     ];
+    final PrivilegedHelper? owner = _helper;
+    final GatewayInfo where =
+        owner == null ? const GatewayInfo() : await owner.gateway();
     final IsolationReport report = await guard.begin(
       nodes,
       avoidResolvers: avoid,
       tunnelAddresses: _tunnelAddresses,
+      network: '${where.gateway}|${where.interfaceName}',
+      cache: _dnsCache,
       cancel: cancel,
     );
     if (!report.ok) {
@@ -112,6 +119,29 @@ class DesktopEngine implements VeloEngine {
       deferred: report.deferred,
       note: report.message,
     );
+  }
+
+  File get _dnsCache => File(
+        '${_store.workDir.path}${Platform.pathSeparator}dns-cache.json',
+      );
+
+  Future<void> _warmResolverCache(List<Node> nodes) async {
+    final TestRouteGuard? guard = _guard;
+    if (guard == null) {
+      return;
+    }
+    try {
+      await guard.warm(
+        nodes,
+        cache: _dnsCache,
+        avoidResolvers: <String>[
+          ...await systemResolvers(),
+          ...tunnelDnsServers,
+        ],
+      );
+    } catch (_) {
+      return;
+    }
   }
 
   @override
@@ -470,6 +500,7 @@ class DesktopEngine implements VeloEngine {
 
   @override
   Future<void> shutdown() async {
+    _guardCache?.resolver.dispose();
     await disconnect();
   }
 
