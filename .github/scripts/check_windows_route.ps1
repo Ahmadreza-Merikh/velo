@@ -84,8 +84,31 @@ if (-not (@($state.routes) -contains "$held/32")) {
 }
 Write-Host 'test pins dropped, tunnel route kept'
 
+Write-Host '--- repin rides through a route that vanished under it ---'
+$answer = Invoke-Route 'pin' @($b) 6
+if ($answer.status -ne 'ok') { Fail "staging pin reported $($answer.status)" }
+if (-not (Get-NetRoute -DestinationPrefix "$b/32" -ErrorAction SilentlyContinue)) {
+  Fail "$b was not pinned for the vanish check"
+}
+Get-NetRoute -DestinationPrefix "$b/32" -ErrorAction SilentlyContinue |
+  Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+if (Get-NetRoute -DestinationPrefix "$b/32" -ErrorAction SilentlyContinue) {
+  Fail "could not clear $b to stage the vanish check"
+}
+
+$answer = Invoke-Route 'repin' @() 7
+if ($answer.status -ne 'ok') { Fail "repin over a vanished route reported $($answer.status)" }
+if (Test-Path -LiteralPath (Join-Path $work 'pins.json')) {
+  Fail 'pins survived the repin over a vanished route'
+}
+$state = Get-Content -LiteralPath (Join-Path $work 'state.json') -Raw | ConvertFrom-Json
+if (-not (@($state.routes) -contains "$held/32")) {
+  Fail 'the tunnel route was dropped when a pinned route was already gone'
+}
+Write-Host 'repin rode through the missing route'
+
 Write-Host '--- cleanup with no live tunnel ---'
-$answer = Invoke-Route 'cleanup' @() 6
+$answer = Invoke-Route 'cleanup' @() 8
 if ($answer.status -ne 'ok') { Fail "cleanup reported $($answer.status)" }
 
 Get-NetRoute -DestinationPrefix "$held/32" -ErrorAction SilentlyContinue |
