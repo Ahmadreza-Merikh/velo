@@ -837,7 +837,6 @@ class WindowsHelper implements PrivilegedHelper {
   }
 
   static const String _gatewayQuery = r'''
-$ErrorActionPreference = 'SilentlyContinue'
 ''' + _gatewayFunctions + r'''
 $info = Resolve-GatewayState
 if ($info.state -eq 'found') {
@@ -1160,7 +1159,6 @@ exit 0
   static const String _routeScript = r'''
 param([string]$Requests)
 
-$ErrorActionPreference = 'SilentlyContinue'
 $root = $PSScriptRoot
 $pinPath = Join-Path $root 'pins.json'
 $tunnelPath = Join-Path $root 'state.json'
@@ -1188,7 +1186,7 @@ if ($request.action -eq 'repin') {
   foreach ($prefix in $pinned) {
     Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
-  Remove-Item -LiteralPath $pinPath -Force
+  Remove-Item -LiteralPath $pinPath -Force -ErrorAction SilentlyContinue
   $info = Resolve-GatewayState
   if ($info.state -eq 'foreign') {
     Save-Result $request.seq 'foreigntunnel' 0
@@ -1227,7 +1225,7 @@ if ($request.action -eq 'unpin' -or $request.action -eq 'cleanup') {
   foreach ($prefix in $pinned) {
     Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
-  Remove-Item -LiteralPath $pinPath -Force
+  Remove-Item -LiteralPath $pinPath -Force -ErrorAction SilentlyContinue
   if ($request.action -eq 'cleanup') {
     $live = $false
     if (Test-Path -LiteralPath $tunnelPath) {
@@ -1291,7 +1289,6 @@ exit 0
 ''';
 
   static const String _stopScript = r'''
-$ErrorActionPreference = 'SilentlyContinue'
 $statePath = Join-Path $PSScriptRoot 'state.json'
 $pinPath = Join-Path $PSScriptRoot 'pins.json'
 $v6Path = Join-Path $PSScriptRoot 'ipv6.json'
@@ -1318,14 +1315,15 @@ if (Test-Path -LiteralPath $pinPath) {
 if (Test-Path -LiteralPath $statePath) {
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
   if ($state.pid -and $state.pid -gt 0) {
-    Stop-Process -Id $state.pid -Force
+    Stop-Process -Id $state.pid -Force -ErrorAction SilentlyContinue
   }
   foreach ($prefix in $state.routes) {
     Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $statePath -Force
 } else {
-  Get-Process -Name xray | Stop-Process -Force
+  Get-Process -Name xray -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 }
 exit 0
 ''';

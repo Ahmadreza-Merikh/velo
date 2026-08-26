@@ -19,8 +19,21 @@ function Invoke-Route([string]$action, [string[]]$addresses, [int]$seq) {
   if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result -Force }
   @{ seq = $seq; action = $action; addresses = $addresses } |
     ConvertTo-Json -Compress | Set-Content -LiteralPath $requests -Encoding ASCII
-  & $script -Requests $requests
-  if (-not (Test-Path -LiteralPath $result)) { Fail "$action wrote no result" }
+  $noise = Join-Path $work "stderr-$seq.txt"
+  $run = Start-Process -FilePath 'pwsh' -ArgumentList @(
+    '-NoProfile', '-File', $script, '-Requests', $requests
+  ) -Wait -PassThru -NoNewWindow -RedirectStandardError $noise
+
+  $complaints = ''
+  if (Test-Path -LiteralPath $noise) {
+    $complaints = Get-Content -LiteralPath $noise -Raw
+  }
+  if ($complaints -and $complaints.Trim()) {
+    Fail "$action wrote to the error stream:`n$($complaints.Trim())"
+  }
+  if (-not (Test-Path -LiteralPath $result)) {
+    Fail "$action wrote no result (exit $($run.ExitCode))"
+  }
   $answer = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
   if ($answer.seq -ne $seq) { Fail "$action answered the wrong sequence" }
   return $answer
@@ -29,6 +42,19 @@ function Invoke-Route([string]$action, [string[]]$addresses, [int]$seq) {
 Write-Host '--- the physical default route is visible ---'
 Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
   Select-Object ifIndex, NextHop, RouteMetric | Format-Table | Out-String | Write-Host
+
+Write-Host '--- what the shared resolver sees here ---'
+Get-NetAdapter | Select-Object Name, ifIndex, HardwareInterface, Status |
+  Format-Table | Out-String | Write-Host
+
+python .github/scripts/extract_script.py app/lib/core/privileged_helper.dart _gatewayFunctions |
+  Set-Content -LiteralPath (Join-Path $work 'velo-gateway.ps1') -Encoding UTF8
+. (Join-Path $work 'velo-gateway.ps1')
+$seen = Resolve-GatewayState
+Write-Host "state=$($seen.state) nextHop=$($seen.nextHop) ifIndex=$($seen.ifIndex) interface=$($seen.interface) foreign=$($seen.foreign)"
+if ($seen.state -ne 'found') {
+  Fail "the resolver found no physical gateway (state=$($seen.state), foreign=$($seen.foreign))"
+}
 
 Write-Host '--- pin adds real routes ---'
 $a = '192.0.2.10'
