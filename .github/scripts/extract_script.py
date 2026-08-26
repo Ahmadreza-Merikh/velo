@@ -3,28 +3,43 @@ import re
 import sys
 
 source = io.open(sys.argv[1], encoding='utf-8').read()
-name = sys.argv[2]
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-DECL = r"static const String %s =\s*(.*?);\n"
-PART = re.compile(r"r'''(.*?)'''|([A-Za-z_][A-Za-z0-9_]*)", re.S)
+
+def fail(why):
+    sys.stderr.write(why + '\n')
+    sys.exit(1)
 
 
 def resolve(target, seen):
     if target in seen:
-        sys.stderr.write('%s is defined in terms of itself\n' % target)
-        sys.exit(1)
+        fail('%s is defined in terms of itself' % target)
     seen = seen | {target}
-    match = re.search(DECL % re.escape(target), source, re.S)
-    if match is None:
-        sys.stderr.write('could not find %s\n' % target)
-        sys.exit(1)
-    out = []
-    for literal, reference in PART.findall(match.group(1)):
-        if reference:
-            out.append(resolve(reference, seen))
-        else:
-            out.append(literal)
-    return ''.join(out)
+    head = 'static const String %s =' % target
+    at = source.find(head)
+    if at < 0:
+        fail('could not find %s' % target)
+    at += len(head)
+    parts = []
+    while True:
+        while at < len(source) and source[at] in ' \t\n+':
+            at += 1
+        if at >= len(source):
+            fail('%s never ends' % target)
+        if source[at] == ';':
+            return ''.join(parts)
+        if source.startswith("r'''", at):
+            shut = source.find("'''", at + 4)
+            if shut < 0:
+                fail('%s has an unterminated string' % target)
+            parts.append(source[at + 4:shut])
+            at = shut + 3
+            continue
+        word = NAME.match(source, at)
+        if not word:
+            fail('%s has something unexpected in it' % target)
+        parts.append(resolve(word.group(0), seen))
+        at = word.end()
 
 
-sys.stdout.write(resolve(name, frozenset()))
+sys.stdout.write(resolve(sys.argv[2], frozenset()))
