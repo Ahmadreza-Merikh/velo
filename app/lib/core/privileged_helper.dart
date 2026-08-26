@@ -1045,6 +1045,20 @@ function Resolve-GatewayState {
   }
   return @{ state = 'none'; nextHop = ''; ifIndex = 0; interface = ''; foreign = '' }
 }
+
+function Resolve-Gateway6 {
+  $candidates = @(Get-NetRoute -DestinationPrefix '::/0' -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -ne '::' })
+  $physical = @()
+  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
+      $physical += $adapter.ifIndex
+    }
+  }
+  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
+  if ($onPhysical.Count -eq 0) { return $null }
+  return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
+}
 ''';
 
   static const String _startScript = r'''
@@ -1145,11 +1159,20 @@ if (-not (Test-Path -LiteralPath $v6Path)) {
   @{ bindings = $saved } | ConvertTo-Json -Depth 4 |
     Set-Content -LiteralPath $v6Path -Encoding ASCII
 }
-foreach ($entry in (Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json).bindings) {
-  if ($entry.enabled) {
-    Disable-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
-  }
+$record = Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json
+$stubborn = @()
+foreach ($entry in @($record.bindings)) {
+  if (-not $entry.enabled) { continue }
+  Disable-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+  $after = Get-NetAdapterBinding -Name $entry.name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+  if (-not $after -or $after.Enabled) { $stubborn += $entry.name }
 }
+$keep = @()
+foreach ($entry in @($record.bindings)) {
+  $keep += @{ name = $entry.name; enabled = [bool]$entry.enabled }
+}
+@{ bindings = $keep; stubborn = @($stubborn) } | ConvertTo-Json -Depth 4 |
+  Set-Content -LiteralPath $v6Path -Encoding ASCII
 
 @{ pid = $process.Id; routes = $added } | ConvertTo-Json |
   Set-Content -LiteralPath $statePath -Encoding ASCII
@@ -1196,13 +1219,22 @@ if ($request.action -eq 'repin') {
     Save-Result $request.seq 'nogateway' 0
     exit 3
   }
+  $ipv6Contained = $false
+  $v6Path = Join-Path $root 'ipv6.json'
+  if (Test-Path -LiteralPath $v6Path) {
+    $v6 = Get-Content -LiteralPath $v6Path -Raw | ConvertFrom-Json
+    $ipv6Contained = (@($v6.stubborn).Count -eq 0)
+  }
   $kept = @()
   if (Test-Path -LiteralPath $tunnelPath) {
     $state = Get-Content -LiteralPath $tunnelPath -Raw | ConvertFrom-Json
     foreach ($prefix in @($state.routes)) {
       if (-not $prefix) { continue }
-      if ($prefix -like '*/32' -and $prefix -notlike '0.0.0.0/*' -and
-        $prefix -notlike '128.0.0.0/*') {
+      if ($prefix -like '0.0.0.0/*' -or $prefix -like '128.0.0.0/*') {
+        $kept += $prefix
+        continue
+      }
+      if ($prefix -like '*/32') {
         Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
         try {
           New-NetRoute -DestinationPrefix $prefix -NextHop $info.nextHop `
@@ -1210,9 +1242,25 @@ if ($request.action -eq 'repin') {
             -ErrorAction Stop | Out-Null
           $kept += $prefix
         } catch { }
-      } else {
-        $kept += $prefix
+        continue
       }
+      if ($prefix -like '*/128') {
+        $gateway6 = $null
+        if (-not $ipv6Contained) { $gateway6 = Resolve-Gateway6 }
+        if (-not $gateway6) {
+          $kept += $prefix
+          continue
+        }
+        Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
+        try {
+          New-NetRoute -DestinationPrefix $prefix -NextHop $gateway6.NextHop `
+            -InterfaceIndex $gateway6.ifIndex -PolicyStore ActiveStore `
+            -ErrorAction Stop | Out-Null
+          $kept += $prefix
+        } catch { }
+        continue
+      }
+      $kept += $prefix
     }
     @{ pid = $state.pid; routes = @($kept) } | ConvertTo-Json |
       Set-Content -LiteralPath $tunnelPath -Encoding ASCII

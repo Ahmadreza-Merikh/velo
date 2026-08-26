@@ -133,9 +133,52 @@ if (-not (@($state.routes) -contains "$held/32")) {
 }
 Write-Host 'repin rode through the missing route'
 
+Write-Host '--- an ipv6 host route is carried through repin ---'
+$v6 = '2001:db8::1'
+@{ pid = 0; routes = @("$held/32", "$v6/128") } | ConvertTo-Json |
+  Set-Content -LiteralPath (Join-Path $work 'state.json') -Encoding ASCII
+@{ bindings = @(); stubborn = @() } | ConvertTo-Json -Depth 4 |
+  Set-Content -LiteralPath (Join-Path $work 'ipv6.json') -Encoding ASCII
+
+$answer = Invoke-Route 'repin' @() 9
+if ($answer.status -ne 'ok') { Fail "repin with an ipv6 route reported $($answer.status)" }
+$state = Get-Content -LiteralPath (Join-Path $work 'state.json') -Raw | ConvertFrom-Json
+if (-not (@($state.routes) -contains "$v6/128")) {
+  Fail 'the ipv6 route was dropped while ipv6 was confirmed off'
+}
+
+Write-Host '--- and again when an adapter refused to turn ipv6 off ---'
+@{ pid = 0; routes = @("$held/32", "$v6/128") } | ConvertTo-Json |
+  Set-Content -LiteralPath (Join-Path $work 'state.json') -Encoding ASCII
+@{ bindings = @(); stubborn = @('Some Adapter') } | ConvertTo-Json -Depth 4 |
+  Set-Content -LiteralPath (Join-Path $work 'ipv6.json') -Encoding ASCII
+
+$answer = Invoke-Route 'repin' @() 10
+if ($answer.status -ne 'ok') { Fail "repin over a stubborn adapter reported $($answer.status)" }
+$state = Get-Content -LiteralPath (Join-Path $work 'state.json') -Raw | ConvertFrom-Json
+if (-not (@($state.routes) -contains "$v6/128")) {
+  Fail 'the ipv6 route was dropped when ipv6 was still live'
+}
+Get-NetRoute -DestinationPrefix "$v6/128" -ErrorAction SilentlyContinue |
+  Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+Write-Host 'the ipv6 route survived both readings of the record'
+
+Write-Host '--- cleanup restores the ipv6 bindings it recorded ---'
+$victim = (Get-NetAdapter | Select-Object -First 1).Name
+@{ bindings = @(@{ name = $victim; enabled = $true }); stubborn = @() } |
+  ConvertTo-Json -Depth 4 |
+  Set-Content -LiteralPath (Join-Path $work 'ipv6.json') -Encoding ASCII
+
 Write-Host '--- cleanup with no live tunnel ---'
-$answer = Invoke-Route 'cleanup' @() 8
+$answer = Invoke-Route 'cleanup' @() 11
 if ($answer.status -ne 'ok') { Fail "cleanup reported $($answer.status)" }
+if (Test-Path -LiteralPath (Join-Path $work 'ipv6.json')) {
+  Fail 'cleanup left the ipv6 record behind instead of restoring and clearing it'
+}
+$binding = Get-NetAdapterBinding -Name $victim -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+if ($binding -and -not $binding.Enabled) {
+  Fail "cleanup left ipv6 disabled on $victim"
+}
 
 Get-NetRoute -DestinationPrefix "$held/32" -ErrorAction SilentlyContinue |
   Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
