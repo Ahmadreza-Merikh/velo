@@ -38,6 +38,9 @@ jobs:
       - name: Fetch dependencies
         working-directory: app
         run: flutter pub get
+      - name: The helper sources must analyse clean
+        working-directory: app
+        run: dart analyze lib/core
       - name: Exercise the ipv6 escape check
         working-directory: app
         run: dart run tool/ipv6_probe.dart

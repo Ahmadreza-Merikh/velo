@@ -838,35 +838,16 @@ class WindowsHelper implements PrivilegedHelper {
 
   static const String _gatewayQuery = r'''
 $ErrorActionPreference = 'SilentlyContinue'
-$candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
-  Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' }
-$physical = @()
-foreach ($adapter in (Get-NetAdapter)) {
-  if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
-    $physical += $adapter.ifIndex
-  }
-}
-$pick = @($candidates | Where-Object { $physical -contains $_.ifIndex } |
-  Sort-Object RouteMetric | Select-Object -First 1)
-if ($pick.Count -gt 0) {
-  $adapter = Get-NetAdapter -InterfaceIndex $pick[0].ifIndex
-  Write-Output "gateway=$($pick[0].NextHop)"
-  Write-Output "interface=$($adapter.Name)"
+''' + _gatewayFunctions + r'''
+$info = Resolve-GatewayState
+if ($info.state -eq 'found') {
+  Write-Output "gateway=$($info.nextHop)"
+  Write-Output "interface=$($info.interface)"
 } else {
   Write-Output 'gateway='
   Write-Output 'interface='
 }
-$winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
-  Sort-Object RouteMetric | Select-Object -First 1
-$foreign = ''
-if ($winner) {
-  $winAdapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex
-  if ($winAdapter -and $winAdapter.Name -ne 'Velo' -and
-    $winAdapter.HardwareInterface -ne $true) {
-    $foreign = $winAdapter.Name
-  }
-}
-Write-Output "foreign=$foreign"
+Write-Output "foreign=$($info.foreign)"
 ''';
 
   Future<HelperResult> _route(String action, List<String> addresses) async {
@@ -1025,6 +1006,48 @@ Write-Output "foreign=$foreign"
     return buffer.toString();
   }
 
+  static const String _gatewayFunctions = r'''
+function Resolve-GatewayState {
+  $candidates = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' })
+  $physical = @()
+  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
+      $physical += $adapter.ifIndex
+    }
+  }
+  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
+  if ($onPhysical.Count -gt 0) {
+    $route = $onPhysical | Sort-Object RouteMetric | Select-Object -First 1
+    $name = ''
+    $picked = Get-NetAdapter -InterfaceIndex $route.ifIndex -ErrorAction SilentlyContinue
+    if ($picked) { $name = $picked.Name }
+    return @{
+      state = 'found'
+      nextHop = $route.NextHop
+      ifIndex = $route.ifIndex
+      interface = $name
+      foreign = ''
+    }
+  }
+  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Sort-Object RouteMetric | Select-Object -First 1
+  if ($winner) {
+    $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
+    if ($adapter -and $adapter.Name -ne 'Velo' -and $adapter.HardwareInterface -ne $true) {
+      return @{
+        state = 'foreign'
+        nextHop = ''
+        ifIndex = 0
+        interface = ''
+        foreign = $adapter.Name
+      }
+    }
+  }
+  return @{ state = 'none'; nextHop = ''; ifIndex = 0; interface = ''; foreign = '' }
+}
+''';
+
   static const String _startScript = r'''
 param([string]$Config, [string]$Adapter = 'Velo')
 
@@ -1062,39 +1085,13 @@ foreach ($item in $hosts) {
 }
 $addresses = $addresses | Select-Object -Unique
 
-function Get-PhysicalDefaultRoute {
-  $candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }
-  if (-not $candidates) { return $null }
-  $physical = @()
-  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
-    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
-      $physical += $adapter.ifIndex
-    }
-  }
-  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
-  if ($onPhysical.Count -gt 0) {
-    return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
-  }
-  return ($candidates | Sort-Object RouteMetric | Select-Object -First 1)
+''' + _gatewayFunctions + r'''
+$info = Resolve-GatewayState
+if ($info.state -eq 'foreign') {
+  Write-Error "another vpn is holding the default route on $($info.foreign), disconnect it and try again"
+  exit 4
 }
-
-function Test-ForeignTunnel {
-  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Sort-Object RouteMetric | Select-Object -First 1
-  if (-not $winner) { return $false }
-  $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
-  if (-not $adapter) { return $false }
-  if ($adapter.Name -eq 'Velo') { return $false }
-  return ($adapter.HardwareInterface -ne $true)
-}
-
-$default = Get-PhysicalDefaultRoute
-if (-not $default) {
-  if (Test-ForeignTunnel) {
-    Write-Error 'another vpn is holding the default route, disconnect it and try again'
-    exit 4
-  }
+if ($info.state -ne 'found') {
   Write-Error 'could not find your physical network gateway'
   exit 3
 }
@@ -1102,8 +1099,8 @@ if (-not $default) {
 $added = @()
 foreach ($address in $addresses) {
   try {
-    New-NetRoute -DestinationPrefix "$address/32" -NextHop $default.NextHop `
-      -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore | Out-Null
+    New-NetRoute -DestinationPrefix "$address/32" -NextHop $info.nextHop `
+      -InterfaceIndex $info.ifIndex -PolicyStore ActiveStore | Out-Null
     $added += "$address/32"
   } catch { }
 }
@@ -1169,33 +1166,7 @@ $pinPath = Join-Path $root 'pins.json'
 $tunnelPath = Join-Path $root 'state.json'
 $limit = 1024
 
-function Get-PhysicalDefaultRoute {
-  $candidates = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }
-  if (-not $candidates) { return $null }
-  $physical = @()
-  foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
-    if ($adapter.HardwareInterface -eq $true -and $adapter.Name -ne 'Velo') {
-      $physical += $adapter.ifIndex
-    }
-  }
-  $onPhysical = @($candidates | Where-Object { $physical -contains $_.ifIndex })
-  if ($onPhysical.Count -gt 0) {
-    return ($onPhysical | Sort-Object RouteMetric | Select-Object -First 1)
-  }
-  return ($candidates | Sort-Object RouteMetric | Select-Object -First 1)
-}
-
-function Test-ForeignTunnel {
-  $winner = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Sort-Object RouteMetric | Select-Object -First 1
-  if (-not $winner) { return $false }
-  $adapter = Get-NetAdapter -InterfaceIndex $winner.ifIndex -ErrorAction SilentlyContinue
-  if (-not $adapter) { return $false }
-  if ($adapter.Name -eq 'Velo') { return $false }
-  return ($adapter.HardwareInterface -ne $true)
-}
-
+''' + _gatewayFunctions + r'''
 if (-not $Requests -or -not (Test-Path -LiteralPath $Requests)) { exit 2 }
 
 $request = Get-Content -LiteralPath $Requests -Raw | ConvertFrom-Json
@@ -1218,8 +1189,12 @@ if ($request.action -eq 'repin') {
     Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $pinPath -Force
-  $default = Get-PhysicalDefaultRoute
-  if (-not $default) {
+  $info = Resolve-GatewayState
+  if ($info.state -eq 'foreign') {
+    Save-Result $request.seq 'foreigntunnel' 0
+    exit 4
+  }
+  if ($info.state -ne 'found') {
     Save-Result $request.seq 'nogateway' 0
     exit 3
   }
@@ -1232,8 +1207,8 @@ if ($request.action -eq 'repin') {
         $prefix -notlike '128.0.0.0/*') {
         Remove-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
         try {
-          New-NetRoute -DestinationPrefix $prefix -NextHop $default.NextHop `
-            -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore `
+          New-NetRoute -DestinationPrefix $prefix -NextHop $info.nextHop `
+            -InterfaceIndex $info.ifIndex -PolicyStore ActiveStore `
             -ErrorAction Stop | Out-Null
           $kept += $prefix
         } catch { }
@@ -1282,12 +1257,12 @@ if (Test-Path -LiteralPath $tunnelPath) {
   $tunnel = @($tunnel | Where-Object { $_ })
 }
 
-$default = Get-PhysicalDefaultRoute
-if (-not $default) {
-  if (Test-ForeignTunnel) {
-    Save-Result $request.seq 'foreigntunnel' 0
-    exit 4
-  }
+$info = Resolve-GatewayState
+if ($info.state -eq 'foreign') {
+  Save-Result $request.seq 'foreigntunnel' 0
+  exit 4
+}
+if ($info.state -ne 'found') {
   Save-Result $request.seq 'nogateway' 0
   exit 3
 }
@@ -1301,8 +1276,8 @@ foreach ($address in @($request.addresses)) {
   if ($tunnel -contains $prefix) { continue }
   if ($pinned -contains $prefix) { continue }
   try {
-    New-NetRoute -DestinationPrefix $prefix -NextHop $default.NextHop `
-      -InterfaceIndex $default.ifIndex -PolicyStore ActiveStore `
+    New-NetRoute -DestinationPrefix $prefix -NextHop $info.nextHop `
+      -InterfaceIndex $info.ifIndex -PolicyStore ActiveStore `
       -ErrorAction Stop | Out-Null
     $pinned += $prefix
     $added += 1
